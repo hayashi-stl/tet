@@ -1,6 +1,10 @@
 mod id_map;
 pub mod tet;
 
+use nalgebra::Point3;
+
+type Pt3 = Point3<f64>;
+
 #[macro_export]
 #[doc(hidden)]
 macro_rules! id {
@@ -27,7 +31,7 @@ macro_rules! id {
 
         impl $name {
             /// Returns an invalid id.
-            pub(crate) fn invalid() -> Self {
+            pub(crate) const fn invalid() -> Self {
                 Self(crate::id_map::IdType::MAX)
             }
         }
@@ -36,3 +40,20 @@ macro_rules! id {
 
 id!(pub struct VertexId);
 id!(pub struct TetId);
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! alias {
+    ($alias:ident, $(#[$attr:meta])* $pub:vis fn $name:ident($($(($mut:tt))? $arg:ident: $arg_type:ty),*) -> $ret:ty {$($body:tt)*}) => {
+        $(#[$attr])*
+        $pub fn $name($($($mut)? $arg: $arg_type),*) -> $ret {
+            $($body)*
+        }
+
+        $(#[$attr])*
+        /// This is an alias.
+        $pub fn $alias($($arg: $arg_type),*) -> $ret {
+            Self::$name($($arg),*)
+        }
+    }
+}

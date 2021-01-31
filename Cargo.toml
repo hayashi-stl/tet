@@ -1,5 +1,5 @@
 [package]
-name = "cimplex2"
+name = "tet"
 version = "0.1.0"
 authors = ["Joshua Ani <josh4820@gmail.com>"]
 edition = "2018"
@@ -8,3 +8,5 @@ edition = "2018"
 
 [dependencies]
 fnv = "1.0"
+nalgebra = "0.24"
+simplicity = "0.3"

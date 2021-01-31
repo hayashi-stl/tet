@@ -1,7 +1,12 @@
 use fnv::FnvHashSet;
-use std::{iter::FromIterator, marker::PhantomData, ops::{Index, IndexMut}, slice};
-use std::vec;
 use std::iter::Enumerate;
+use std::vec;
+use std::{
+    iter::FromIterator,
+    marker::PhantomData,
+    ops::{Index, IndexMut},
+    slice,
+};
 
 pub type IdType = u32;
 
@@ -48,7 +53,9 @@ impl<K: Id, V> IdMap<K, V> {
 
     /// Gets the value with a specific key mutably, if it exists.
     pub(crate) fn get_mut(&mut self, key: K) -> Option<&mut V> {
-        self.map.get_mut(key.int() as usize).and_then(|v| v.as_mut())
+        self.map
+            .get_mut(key.int() as usize)
+            .and_then(|v| v.as_mut())
     }
 
     /// Inserts a value into the map and returns the key for that value.
@@ -83,7 +90,10 @@ impl<K: Id, V> IdMap<K, V> {
 
     /// Extends the values with an iterator and returns an iterator over the keys in order of insertion.
     #[must_use = "This is an iterator."]
-    pub(crate) fn extend_values<I: IntoIterator<Item = V>>(&mut self, values: I) -> ExtendValues<K, V, I::IntoIter> {
+    pub(crate) fn extend_values<I: IntoIterator<Item = V>>(
+        &mut self,
+        values: I,
+    ) -> ExtendValues<K, V, I::IntoIter> {
         ExtendValues {
             map: self,
             values: values.into_iter(),
@@ -92,7 +102,11 @@ impl<K: Id, V> IdMap<K, V> {
 
     /// Removes the value with a specific key and returns that value, if it existed.
     pub(crate) fn remove(&mut self, key: K) -> Option<V> {
-        let opt_value = self.map.get_mut(key.int() as usize).unwrap_or(&mut None).take();
+        let opt_value = self
+            .map
+            .get_mut(key.int() as usize)
+            .unwrap_or(&mut None)
+            .take();
 
         if opt_value.is_some() {
             self.free.insert(key.int());
@@ -135,17 +149,23 @@ impl<K: Id, V> IdMap<K, V> {
 
     /// Turns this into an iterator over the values.
     pub(crate) fn into_values(self) -> IntoValues<V> {
-        IntoValues { iter: self.map.into_iter() }
+        IntoValues {
+            iter: self.map.into_iter(),
+        }
     }
 
     /// Iterates over values.
     pub(crate) fn values(&self) -> Values<V> {
-        Values { iter: self.map.iter() }
+        Values {
+            iter: self.map.iter(),
+        }
     }
 
     /// Iterates over values mutably.
     pub(crate) fn values_mut(&mut self) -> ValuesMut<V> {
-        ValuesMut { iter: self.map.iter_mut() }
+        ValuesMut {
+            iter: self.map.iter_mut(),
+        }
     }
 }
 
@@ -192,13 +212,15 @@ impl<K: Id, V> Index<K> for IdMap<K, V> {
     type Output = V;
 
     fn index(&self, index: K) -> &Self::Output {
-        self.get(index).expect(&format!("Index {} does not exist.", index.int()))
+        self.get(index)
+            .expect(&format!("Index {} does not exist.", index.int()))
     }
 }
 
 impl<K: Id, V> IndexMut<K> for IdMap<K, V> {
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
-        self.get_mut(index).expect(&format!("Index {} does not exist.", index.int()))
+        self.get_mut(index)
+            .expect(&format!("Index {} does not exist.", index.int()))
     }
 }
 
@@ -249,7 +271,6 @@ impl<'a, V> Iterator for Values<'a, V> {
     }
 }
 
-
 pub(crate) struct ValuesMut<'a, V> {
     iter: slice::IterMut<'a, Option<V>>,
 }
@@ -266,7 +287,6 @@ impl<'a, V> Iterator for ValuesMut<'a, V> {
         None
     }
 }
-
 
 pub(crate) struct IntoIter<K, V> {
     iter: Enumerate<vec::IntoIter<Option<V>>>,
@@ -303,7 +323,6 @@ impl<'a, K: Id, V> Iterator for Iter<'a, K, V> {
         None
     }
 }
-
 
 pub(crate) struct IterMut<'a, K, V> {
     iter: Enumerate<slice::IterMut<'a, Option<V>>>,
