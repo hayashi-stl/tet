@@ -69,6 +69,71 @@ impl<T> Tet<T> {
     }
 }
 
+const fn permutation_arr(inv: bool) -> [[u32; 12]; 12] {
+    let mut arr = [[0; 12]; 12];
+    let perms = [
+        [3, 2, 1, 0],
+        [2, 3, 0, 1],
+        [1, 0, 3, 2],
+        [0, 1, 2, 3],
+        [2, 1, 3, 0],
+        [3, 0, 2, 1],
+        [0, 3, 1, 2],
+        [1, 2, 0, 3],
+        [1, 3, 2, 0],
+        [0, 2, 3, 1],
+        [3, 1, 0, 2],
+        [2, 0, 1, 3],
+    ];
+
+    let mut p = 0;
+    while p < 12 {
+        let mut i = 0;
+        while i < 12 {
+            let mut perm = perms[p];
+            if inv {
+                let mut inv = [0; 4];
+                inv[perm[0]] = 0;
+                inv[perm[1]] = 1;
+                inv[perm[2]] = 2;
+                inv[perm[3]] = 3;
+                perm = inv;
+            }
+
+            let edge = [perm[perms[i][0]], perm[perms[i][1]]];
+            let mut new = 0;
+            while new < 12 {
+                if edge[0] == perms[new][0] && edge[1] == perms[new][1] {
+                    arr[p][i] = new as u32;
+                }
+                new += 1;
+            }
+            
+            i += 1;
+        }
+        p += 1;
+    }
+
+    arr
+}
+
+/// A permutation of the vertices of a tet walker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum Permutation {
+    _3210,
+    _2301,
+    _1032,
+    _0123,
+    _2130,
+    _3021,
+    _0312,
+    _1203,
+    _1320,
+    _0231,
+    _3102,
+    _2013,
+}
+
 /// A walker over the tetrahedrons of a tet mesh.
 /// The edge index is a number in 0..12 indexing into
 /// the edges of a tet.
@@ -96,32 +161,40 @@ impl<T> Tet<T> {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TetWalker {
     tet: TetId,
-    edge_index: u32,
+    edge: u32,
 }
 
 impl TetWalker {
+    /// Index by permutation first.
+    /// Permutation abcd takes 0123 → abcd
+    const PERMUTATION_FWD: [[u32; 12]; 12] = permutation_arr(false);
+
+    /// Index by permutation first.
+    /// Permutation-inverse abcd takes abcd → 0123
+    const PERMUTATION_INV: [[u32; 12]; 12] = permutation_arr(true);
+
     fn new(tet: TetId, edge_index: u32) -> Self {
-        Self { tet, edge_index }
+        Self { tet, edge: edge_index }
     }
 
     /// Gets the first vertex of the tet walker. This is the current vertex.
     pub fn first<V, T>(self, mesh: &Tets<V, T>) -> VertexId {
-        mesh.tets[self.tet].vertices[[3, 2, 1, 0, 2, 3, 0, 1, 1, 0, 3, 2][self.edge_index as usize]]
+        mesh.tets[self.tet].vertices[[3, 2, 1, 0, 2, 3, 0, 1, 1, 0, 3, 2][self.edge as usize]]
     }
 
     /// Gets the second vertex of the tet walker. This is the current edge's target.
     pub fn second<V, T>(self, mesh: &Tets<V, T>) -> VertexId {
-        mesh.tets[self.tet].vertices[[2, 3, 0, 1, 1, 0, 3, 2, 3, 2, 1, 0][self.edge_index as usize]]
+        mesh.tets[self.tet].vertices[[2, 3, 0, 1, 1, 0, 3, 2, 3, 2, 1, 0][self.edge as usize]]
     }
 
     /// Gets the third vertex of the tet walker.
     pub fn third<V, T>(self, mesh: &Tets<V, T>) -> VertexId {
-        mesh.tets[self.tet].vertices[[1, 0, 3, 2, 3, 2, 1, 0, 2, 3, 0, 1][self.edge_index as usize]]
+        mesh.tets[self.tet].vertices[[1, 0, 3, 2, 3, 2, 1, 0, 2, 3, 0, 1][self.edge as usize]]
     }
 
     /// Gets the fourth vertex of the tet walker. This is the vertex opposite the current triangle.
     pub fn fourth<V, T>(self, mesh: &Tets<V, T>) -> VertexId {
-        mesh.tets[self.tet].vertices[[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3][self.edge_index as usize]]
+        mesh.tets[self.tet].vertices[[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3][self.edge as usize]]
     }
 
     /// Gets the current edge of the tet walker.
@@ -164,7 +237,7 @@ impl TetWalker {
         to_nfe,
         /// Advance to the next edge in the current triangle.
         pub fn to_next_tri_edge((mut) self: Self) -> Self {
-            self.edge_index = (self.edge_index + 4) % 12;
+            self.edge = (self.edge + 4) % 12;
             self
         }
     }
@@ -173,7 +246,7 @@ impl TetWalker {
         to_pfe,
         /// Advance to the previous edge in the current triangle.
         pub fn to_prev_tri_edge((mut) self: Self) -> Self {
-            self.edge_index = (self.edge_index + 8) % 12;
+            self.edge = (self.edge + 8) % 12;
             self
         }
     }
@@ -182,7 +255,7 @@ impl TetWalker {
         to_nve,
         /// Advance to the next edge from the current vertex. This is a counterclockwise rotation.
         pub fn to_next_vertex_edge((mut) self: Self) -> Self {
-            self.edge_index = [10, 11, 8, 9, 1, 0, 3, 2, 7, 6, 5, 4][self.edge_index as usize];
+            self.edge = [10, 11, 8, 9, 1, 0, 3, 2, 7, 6, 5, 4][self.edge as usize];
             self
         }
     }
@@ -191,20 +264,40 @@ impl TetWalker {
         to_pve,
         /// Advance to the previous edge from the current vertex. This is a clockwise rotation.
         pub fn to_prev_vertex_edge((mut) self: Self) -> Self {
-            self.edge_index = [5, 4, 7, 6, 11, 10, 9, 8, 2, 3, 0, 1][self.edge_index as usize];
+            self.edge = [5, 4, 7, 6, 11, 10, 9, 8, 2, 3, 0, 1][self.edge as usize];
             self
         }
     }
 
     /// Flip the current edge, keeping the current tet the same.
     pub fn to_twin_edge(mut self) -> Self {
-        self.edge_index = [1, 0, 3, 2, 7, 6, 5, 4, 10, 11, 8, 9][self.edge_index as usize];
+        self.edge = [1, 0, 3, 2, 7, 6, 5, 4, 10, 11, 8, 9][self.edge as usize];
         self
     }
 
     /// Sets the current edge to the opposite edge of the current tet.
     pub fn to_opp_edge(mut self) -> Self {
-        self.edge_index = [2, 3, 0, 1, 5, 4, 7, 6, 11, 10, 9, 8][self.edge_index as usize];
+        self.edge = [2, 3, 0, 1, 5, 4, 7, 6, 11, 10, 9, 8][self.edge as usize];
+        self
+    }
+
+    /// Permutes the current vertex order with some forward permutation.
+    /// Use when none of the same-tet operations are what you want.
+    ///
+    /// Special cases:
+    ///
+    /// Perm | Function
+    /// -----|---------
+    /// 0123 | (identity)
+    /// 1203 | `to_next_tri_edge` aka `to_nfe`
+    /// 2013 | `to_prev_tri_edge` aka `to_pfe`
+    /// 0231 | `to_next_vertex_edge` aka `to_nve`
+    /// 0312 | `to_prev_vertex_edge` aka `to_pve`
+    /// 1032 | `to_twin_edge`
+    /// 2301 | `to_opp_edge`
+    pub fn to_perm(mut self, perm: Permutation) -> Self {
+        // Don't question the indexing order here, it just works™
+        self.edge = Self::PERMUTATION_FWD[self.edge as usize][perm as usize];
         self
     }
 
@@ -213,8 +306,8 @@ impl TetWalker {
         /// Flip the current triangle, moving to the adjacent tet on that triangle.
         /// This flips the current edge.
         pub fn to_twin_tri<V, T>((mut) self: Self, mesh: &Tets<V, T>) -> Self {
-            let div = self.edge_index / 4;
-            self = mesh[self.id()].opp_tets[self.edge_index as usize % 4];
+            let div = self.edge / 4;
+            self = mesh[self.id()].opp_tets[self.edge as usize % 4];
             match div {
                 0 => self,
                 1 => self.to_prev_tri_edge(),
@@ -227,15 +320,14 @@ impl TetWalker {
     /// Sets the orientation such that the vertices returned by `self.vertices()`
     /// are in the same order as those returned by `mesh[self.id()].vertices()`.
     pub fn to_canon_tet(mut self) -> Self {
-        self.edge_index = 3;
+        self.edge = 3;
         self
     }
 
     /// Performs a 1-to-4 flip on the mesh without checking whether
     /// such a flip produces negative-volume tets. Use at your own risk.
-    /// Moves the walker to the new vertex while keeping the opposite triangle the same.
-    /// Also returns the 4 tet ids from the flip, with the first one being reused.
-    pub fn flip14_unchecked<V: Clone, T: Clone>(self, mesh: &mut Tets<V, T>, vertex: VertexId) -> (Self, [TetId; 4]) {
+    /// Returns the 4 tet ids from the flip, with the first one being reused.
+    pub fn flip14_unchecked<V: Clone, T: Clone>(self, mesh: &mut Tets<V, T>, vertex: VertexId) -> [TetId; 4] {
         let id0 = self.id();
         let id1 = mesh.tets.insert(mesh.tets[id0].clone());
         let id2 = mesh.tets.insert(mesh.tets[id0].clone());
@@ -271,10 +363,77 @@ impl TetWalker {
         let ids = [id0, id1, id2, id3];
         for i in 1..4 {
             let walker = mesh[ids[i]].opp_tets[i];
-            mesh.tets[walker.id()].opp_tets[walker.edge_index as usize % 4].tet = ids[i];
+            mesh.tets[walker.id()].opp_tets[walker.edge as usize % 4].tet = ids[i];
         }
 
-        (self, ids)
+        ids
+    }
+
+    /// Performs a 2-to-3 flip on the mesh without checking whether
+    /// such a flip produces negative-volume tets. Use at your own risk.
+    /// Returns the 3 tet ids from the flip, with the first two being reused.
+    pub fn flip23_unchecked<V: Clone, T: Clone>(self, mesh: &mut Tets<V, T>) -> [TetId; 3] {
+        // Walker on other tri
+        let other = self.to_adj(&mesh);
+
+        let id0 = self.id();
+        let id1 = other.id();
+        let id2 = mesh.tets.insert(mesh.tets[id0].clone());
+
+        // Fix tet walkers on adjacent tets
+        let walk0t = self.to_perm(Permutation::_1032);
+        let adj0t = walk0t.to_adj(&mesh);
+        let walker = &mut mesh.tets[adj0t.id()].opp_tets[adj0t.edge as usize % 4];
+        *walker = TetWalker::new(id0, Self::PERMUTATION_INV[walk0t.edge as usize][walker.edge as usize]);
+
+        let walk1t = self.to_perm(Permutation::_0231);
+        let adj1t = walk1t.to_adj(&mesh);
+        let walker = &mut mesh.tets[adj1t.id()].opp_tets[adj1t.edge as usize % 4];
+        *walker = TetWalker::new(id1, Self::PERMUTATION_INV[walk1t.edge as usize][walker.edge as usize]);
+
+        let walk2t = self.to_perm(Permutation::_2130);
+        let adj2t = walk2t.to_adj(&mesh);
+        let walker = &mut mesh.tets[adj2t.id()].opp_tets[adj2t.edge as usize % 4];
+        *walker = TetWalker::new(id2, Self::PERMUTATION_INV[walk2t.edge as usize][walker.edge as usize]);
+
+        // Bottom tets; permutations are a little different
+        let adj0b = other.to_perm(Permutation::_1032).to_adj(&mesh);
+        let walker = &mut mesh.tets[adj0b.id()].opp_tets[adj0b.edge as usize % 4];
+        *walker = TetWalker::new(id0, Self::PERMUTATION_INV[other.edge as usize][walker.edge as usize]);
+
+        let adj1b = other.to_perm(Permutation::_2130).to_adj(&mesh);
+        let walker = &mut mesh.tets[adj1b.id()].opp_tets[adj1b.edge as usize % 4];
+        *walker = TetWalker::new(id1, Self::PERMUTATION_INV[other.to_nfe().edge as usize][walker.edge as usize]);
+
+        let adj2b = other.to_perm(Permutation::_0231).to_adj(&mesh);
+        let walker = &mut mesh.tets[adj2b.id()].opp_tets[adj2b.edge as usize % 4];
+        *walker = TetWalker::new(id2, Self::PERMUTATION_INV[other.to_pfe().edge as usize][walker.edge as usize]);
+
+        // Introduce the 3 new tets
+        let ([v1, v0, v2, v3], v4) = (self.tet(&mesh), other.fourth(&mesh));
+
+        let tet = &mut mesh.tets[id0];
+        tet.vertices = [v0, v1, v3, v4];
+        tet.opp_tets[0] = TetWalker::new(id1, 1);
+        tet.opp_tets[1] = TetWalker::new(id2, 0);
+        tet.opp_tets[2] = TetWalker::new(adj0b.id(), adj0b.edge);
+        tet.opp_tets[3] = TetWalker::new(adj0t.id(), adj0t.edge);
+
+        let tet = &mut mesh.tets[id1];
+        tet.vertices = [v1, v2, v3, v4];
+        tet.opp_tets[0] = TetWalker::new(id2, 1);
+        tet.opp_tets[1] = TetWalker::new(id0, 0);
+        tet.opp_tets[2] = TetWalker::new(adj1b.id(), adj1b.edge);
+        tet.opp_tets[3] = TetWalker::new(adj1t.id(), adj1t.edge);
+
+        let tet = &mut mesh.tets[id2];
+        tet.vertices = [v2, v0, v3, v4];
+        tet.opp_tets[0] = TetWalker::new(id0, 1);
+        tet.opp_tets[1] = TetWalker::new(id1, 0);
+        tet.opp_tets[2] = TetWalker::new(adj2b.id(), adj2b.edge);
+        tet.opp_tets[3] = TetWalker::new(adj2t.id(), adj2t.edge);
+
+        [id0, id1, id2]
     }
 }
 
@@ -632,6 +791,68 @@ mod tests {
                     } else if vertices[3] == v(0) {
                         // External to internal link
                         vertices[3] = v(4);
+                    } else {
+                        // Internal link
+                        vertices[3] = v((Tets::<(), ()>::GHOST.0 as u64 + 10
+                            - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
+                            as IdType);
+                    }
+                    assert_eq!(
+                        walker.to_adj(&mesh).tet(&mesh),
+                        vertices,
+                        "Flipping {:?}, expected {:?}, got {:?}",
+                        walker.tet(&mesh),
+                        vertices,
+                        walker.to_adj(&mesh).tet(&mesh)
+                    );
+                }
+            }
+        }
+
+        for perm in 0..12 {
+            print!("Perm {:2}:", perm);
+            for i in 0..12 {
+                print!("{:3}", TetWalker::PERMUTATION_FWD[perm][i]);
+            }
+            println!();
+        }
+        println!();
+
+        for perm in 0..12 {
+            print!("Perm {:2}:", perm);
+            for i in 0..12 {
+                print!("{:3}", TetWalker::PERMUTATION_INV[perm][i]);
+            }
+            println!();
+        }
+    }
+
+    #[test]
+    fn test_flip23_unchecked() {
+        let mut mesh = default_tets();
+        mesh.vertices.insert(Vertex::new(TetWalker::new(TetId::invalid(), 0), Pt3::origin(), ()));
+        mesh.walker_from_tet(t(0)).flip14_unchecked(&mut mesh, v(4)); // ids 0, 5, 6, 7
+        mesh.walker_from_tet(t(0)).to_nfe().to_twin_edge().flip23_unchecked(&mut mesh); // flips tri [2, 1, 3] away, opp verts 4 and GHOST
+
+        for tet in 0..9 {
+            for i in 0..12 {
+                let walker = TetWalker::new(t(tet), i);
+                let mut vertices = walker.tet(&mesh);
+
+                // Resultant tet or opposite resultant tet
+                if vertices[3] == v(0) || (vertices.contains(&v(4)) && vertices.contains(&Tets::<(), ()>::GHOST)) {
+                    vertices.swap(0, 1);
+
+                    if vertices[3] == v(4) || vertices[3] == Tets::<(), ()>::GHOST {
+                        // Internal to external link
+                        vertices[3] = v(0);
+                    } else if vertices[3] == v(0) {
+                        // External to internal link
+                        vertices[3] = if vertices[..3].contains(&v(4)) {
+                            Tets::<(), ()>::GHOST
+                        } else {
+                            v(4)
+                        };
                     } else {
                         // Internal link
                         vertices[3] = v((Tets::<(), ()>::GHOST.0 as u64 + 10
