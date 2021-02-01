@@ -147,6 +147,14 @@ impl<K: Id, V> IdMap<K, V> {
         }
     }
 
+    /// Iterates over keys.
+    pub(crate) fn keys(&self) -> Keys<K, V> {
+        Keys {
+            iter: self.map.iter().enumerate(),
+            marker: PhantomData,
+        }
+    }
+
     /// Turns this into an iterator over the values.
     pub(crate) fn into_values(self) -> IntoValues<V> {
         IntoValues {
@@ -213,14 +221,14 @@ impl<K: Id, V> Index<K> for IdMap<K, V> {
 
     fn index(&self, index: K) -> &Self::Output {
         self.get(index)
-            .expect(&format!("Index {} does not exist.", index.int()))
+            .unwrap_or_else(|| panic!("Index {} does not exist.", index.int()))
     }
 }
 
 impl<K: Id, V> IndexMut<K> for IdMap<K, V> {
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
         self.get_mut(index)
-            .expect(&format!("Index {} does not exist.", index.int()))
+            .unwrap_or_else(|| panic!("Index {} does not exist.", index.int()))
     }
 }
 
@@ -234,6 +242,24 @@ impl<'a, K: Id, V, I: Iterator<Item = V>> Iterator for ExtendValues<'a, K, V, I>
 
     fn next(&mut self) -> Option<Self::Item> {
         self.values.next().map(|value| self.map.insert(value))
+    }
+}
+
+pub(crate) struct Keys<'a, K, V> {
+    iter: Enumerate<slice::Iter<'a, Option<V>>>,
+    marker: PhantomData<K>,
+}
+
+impl<'a, K: Id, V> Iterator for Keys<'a, K, V> {
+    type Item = K;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((key, value)) = self.iter.next() {
+            if let Some(_) = value.as_ref() {
+                return Some(K::from_int(key as IdType));
+            }
+        }
+        None
     }
 }
 
