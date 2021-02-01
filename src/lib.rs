@@ -44,16 +44,22 @@ id!(pub struct TetId);
 #[macro_export]
 #[doc(hidden)]
 macro_rules! alias {
-    ($alias:ident, $(#[$attr:meta])* $pub:vis fn $name:ident($($(($mut:tt))? $arg:ident: $arg_type:ty),*) -> $ret:ty {$($body:tt)*}) => {
+    (
+        $alias:ident,
+        $(#[$attr:meta])*
+        $pub:vis fn $name:ident$(<$($gen:ident),*>)?($($(($mut:tt))? $arg:ident: $arg_type:ty),*) -> $ret:ty {
+            $($body:tt)*
+        }
+    ) => {
         $(#[$attr])*
-        $pub fn $name($($($mut)? $arg: $arg_type),*) -> $ret {
+        $pub fn $name$(<$($gen),*>)?($($($mut)? $arg: $arg_type),*) -> $ret {
             $($body)*
         }
 
         $(#[$attr])*
         /// This is an alias.
-        $pub fn $alias($($arg: $arg_type),*) -> $ret {
-            Self::$name($($arg),*)
+        $pub fn $alias$(<$($gen),*>)?($($arg: $arg_type),*) -> $ret {
+            Self::$name $(::<$($gen),*>)?($($arg),*)
         }
     }
 }

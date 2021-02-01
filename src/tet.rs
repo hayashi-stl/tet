@@ -37,7 +37,11 @@ impl<V> Vertex<V> {
 ///
 /// At most 1 vertex id is allowed to be invalid. If there is an
 /// invalid vertex id, then this is a ghost tet.
-/// Walkers store the index of the first edge of the opposite triangle.
+///
+///
+/// Walkers store the index of the edge of the opposite triangle
+/// that is the twin of the first edge of the current triangle.
+/// This idea is borrowed from TetGen.
 #[derive(Clone, Debug)]
 pub struct Tet<T> {
     vertices: [VertexId; 4],
@@ -193,7 +197,7 @@ impl TetWalker {
     }
 
     /// Flip the current edge, keeping the current tet the same.
-    pub fn to_flip_edge(mut self) -> Self {
+    pub fn to_twin_edge(mut self) -> Self {
         self.edge_index = [1, 0, 3, 2, 7, 6, 5, 4, 10, 11, 8, 9][self.edge_index as usize];
         self
     }
@@ -204,11 +208,73 @@ impl TetWalker {
         self
     }
 
+    crate::alias! {
+        to_adj,
+        /// Flip the current triangle, moving to the adjacent tet on that triangle.
+        /// This flips the current edge.
+        pub fn to_twin_tri<V, T>((mut) self: Self, mesh: &Tets<V, T>) -> Self {
+            let div = self.edge_index / 4;
+            self = mesh[self.id()].opp_tets[self.edge_index as usize % 4];
+            match div {
+                0 => self,
+                1 => self.to_prev_tri_edge(),
+                2 => self.to_next_tri_edge(),
+                _ => unreachable!(),
+            }
+        }
+    }
+
     /// Sets the orientation such that the vertices returned by `self.vertices()`
     /// are in the same order as those returned by `mesh[self.id()].vertices()`.
     pub fn to_canon_tet(mut self) -> Self {
         self.edge_index = 3;
         self
+    }
+
+    /// Performs a 1-to-4 flip on the mesh without checking whether
+    /// such a flip produces negative-volume tets. Use at your own risk.
+    /// Moves the walker to the new vertex while keeping the opposite triangle the same.
+    /// Also returns the 4 tet ids from the flip, with the first one being reused.
+    pub fn flip14_unchecked<V: Clone, T: Clone>(self, mesh: &mut Tets<V, T>, vertex: VertexId) -> (Self, [TetId; 4]) {
+        let id0 = self.id();
+        let id1 = mesh.tets.insert(mesh.tets[id0].clone());
+        let id2 = mesh.tets.insert(mesh.tets[id0].clone());
+        let id3 = mesh.tets.insert(mesh.tets[id0].clone());
+
+        // The vertex didn't have a tet before.
+        mesh.vertices[vertex].tet = self;
+
+        // Update tets
+        // Note that adjacent tets need to change their opposite tet ids,
+        // but not their opposite tet edge indexes because they refer to the same face.
+        mesh.tets[id0].vertices[0] = vertex;
+        mesh.tets[id0].opp_tets[1] = TetWalker::new(id1, 0);
+        mesh.tets[id0].opp_tets[2] = TetWalker::new(id2, 4);
+        mesh.tets[id0].opp_tets[3] = TetWalker::new(id3, 8);
+
+        mesh.tets[id1].vertices[1] = vertex;
+        mesh.tets[id1].opp_tets[2] = TetWalker::new(id2, 9);
+        mesh.tets[id1].opp_tets[3] = TetWalker::new(id3, 5);
+        mesh.tets[id1].opp_tets[0] = TetWalker::new(id0, 1);
+
+        mesh.tets[id2].vertices[2] = vertex;
+        mesh.tets[id2].opp_tets[3] = TetWalker::new(id3, 2);
+        mesh.tets[id2].opp_tets[0] = TetWalker::new(id0, 6);
+        mesh.tets[id2].opp_tets[1] = TetWalker::new(id1, 10);
+
+        mesh.tets[id3].vertices[3] = vertex;
+        mesh.tets[id3].opp_tets[0] = TetWalker::new(id0, 11);
+        mesh.tets[id3].opp_tets[1] = TetWalker::new(id1, 7);
+        mesh.tets[id3].opp_tets[2] = TetWalker::new(id2, 3);
+
+        // Update adjacent tets' opposite indexes
+        let ids = [id0, id1, id2, id3];
+        for i in 1..4 {
+            let walker = mesh[ids[i]].opp_tets[i];
+            mesh.tets[walker.id()].opp_tets[walker.edge_index as usize % 4].tet = ids[i];
+        }
+
+        (self, ids)
     }
 }
 
@@ -220,7 +286,7 @@ pub struct Tets<V, T> {
     default_tet: fn() -> T,
 }
 
-impl<V: Clone, T: Clone> Tets<V, T> {
+impl<V, T> Tets<V, T> {
     pub const GHOST: VertexId = VertexId::invalid();
 
     /// Creates a new tetrahedralization from 4 vertices because it takes
@@ -230,7 +296,11 @@ impl<V: Clone, T: Clone> Tets<V, T> {
     /// The vertex ids are VertexId(i) for i in 0..4.
     ///
     /// The solid tet id is TetId(0) and the ghost tet ids are TetId(i) for i in 1..5.
-    fn new(vertices: [(Pt3, V); 4], default_tet: fn() -> T) -> Self {
+    fn new(vertices: [(Pt3, V); 4], default_tet: fn() -> T) -> Self
+    where
+        V: Clone,
+        T: Clone,
+    {
         let mut tets = Self {
             vertices: IdMap::default(),
             tets: IdMap::default(),
@@ -264,11 +334,11 @@ impl<V: Clone, T: Clone> Tets<V, T> {
         ];
 
         let opps_arr = [
-            [tw(1, 3), tw(2, 3), tw(3, 3), tw(4, 3)],
-            [tw(2, 0), tw(3, 1), tw(4, 2), tw(0, 0)],
-            [tw(1, 0), tw(4, 1), tw(3, 2), tw(0, 1)],
-            [tw(4, 0), tw(1, 1), tw(2, 2), tw(0, 2)],
-            [tw(3, 0), tw(2, 1), tw(1, 2), tw(0, 3)],
+            [tw(1, 7), tw(2, 7), tw(3, 7), tw(4, 7)],
+            [tw(2, 8), tw(3, 5), tw(4, 2), tw(0, 4)],
+            [tw(1, 8), tw(4, 5), tw(3, 2), tw(0, 5)],
+            [tw(4, 8), tw(1, 5), tw(2, 2), tw(0, 6)],
+            [tw(3, 8), tw(2, 5), tw(1, 2), tw(0, 7)],
         ];
 
         tets.tets
@@ -316,7 +386,7 @@ impl<V: Clone, T: Clone> Tets<V, T> {
     }
 }
 
-impl<V: Clone, T: Clone> Index<VertexId> for Tets<V, T> {
+impl<V, T> Index<VertexId> for Tets<V, T> {
     type Output = Vertex<V>;
 
     fn index(&self, index: VertexId) -> &Self::Output {
@@ -325,7 +395,7 @@ impl<V: Clone, T: Clone> Index<VertexId> for Tets<V, T> {
     }
 }
 
-impl<V: Clone, T: Clone> Index<TetId> for Tets<V, T> {
+impl<V, T> Index<TetId> for Tets<V, T> {
     type Output = Tet<T>;
 
     fn index(&self, index: TetId) -> &Self::Output {
@@ -507,12 +577,77 @@ mod tests {
             vertices[1..].rotate_left(1);
             vertices.swap(0, 1);
             vertices.swap(2, 3);
-            assert_eq!(walker.to_flip_edge().tet(&mesh), vertices);
+            assert_eq!(walker.to_twin_edge().tet(&mesh), vertices);
 
             vertices.swap(0, 1);
             vertices.swap(2, 3);
             vertices.rotate_left(2);
             assert_eq!(walker.to_opp_edge().tet(&mesh), vertices);
+        }
+    }
+
+    #[test]
+    fn test_to_twin_tri() {
+        for mesh in vec![default_tets(), reverse_tets()] {
+            for tet in 0..5 {
+                for i in 0..12 {
+                    let walker = TetWalker::new(t(tet), i);
+                    let mut vertices = walker.tet(&mesh);
+
+                    // to_twin tri should flip the current edge and set the fourth vertex to the opposite one
+                    vertices.swap(1, 0);
+                    vertices[3] = v((Tets::<(), ()>::GHOST.0 as u64 + 6
+                        - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
+                        as IdType);
+                    assert_eq!(
+                        walker.to_adj(&mesh).tet(&mesh),
+                        vertices,
+                        "Flipping {:?}, expected {:?}, got {:?}",
+                        walker.tet(&mesh),
+                        vertices,
+                        walker.to_adj(&mesh).tet(&mesh)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_flip14_unchecked() {
+        let mut mesh = default_tets();
+        mesh.vertices.insert(Vertex::new(TetWalker::new(TetId::invalid(), 0), Pt3::origin(), ()));
+        mesh.walker_from_tet(t(1)).flip14_unchecked(&mut mesh, v(4));
+
+        for tet in 0..8 {
+            for i in 0..12 {
+                let walker = TetWalker::new(t(tet), i);
+                let mut vertices = walker.tet(&mesh);
+
+                if !vertices[..3].contains(&v(0)) {
+                    vertices.swap(0, 1);
+
+                    if vertices[3] == v(4) {
+                        // Internal to external link
+                        vertices[3] = v(0);
+                    } else if vertices[3] == v(0) {
+                        // External to internal link
+                        vertices[3] = v(4);
+                    } else {
+                        // Internal link
+                        vertices[3] = v((Tets::<(), ()>::GHOST.0 as u64 + 10
+                            - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
+                            as IdType);
+                    }
+                    assert_eq!(
+                        walker.to_adj(&mesh).tet(&mesh),
+                        vertices,
+                        "Flipping {:?}, expected {:?}, got {:?}",
+                        walker.tet(&mesh),
+                        vertices,
+                        walker.to_adj(&mesh).tet(&mesh)
+                    );
+                }
+            }
         }
     }
 }
