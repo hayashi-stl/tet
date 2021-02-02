@@ -3,7 +3,7 @@ use std::ops::Index;
 
 use crate::id_map::{IdMap, IdType};
 use crate::{Pt3, TetId, VertexId};
-use fnv::FnvHashSet;
+use fnv::{FnvHashMap, FnvHashSet};
 use simplicity as sim;
 
 /// A vertex stores a tet that it's part of and its position.
@@ -356,6 +356,12 @@ impl TetWalker {
     /// are in the same order as those returned by `mesh[self.id()].vertices()`.
     pub fn to_canon_tet(mut self) -> Self {
         self.edge = 3;
+        self
+    }
+
+    /// Goes to the canonical orientation of the current triangle.
+    pub fn to_canon_tri(mut self) -> Self {
+        self.edge %= 4;
         self
     }
 
@@ -739,6 +745,61 @@ impl<V, T> Tets<V, T> {
     pub fn walker_from_tet(&self, tet: TetId) -> TetWalker {
         TetWalker::new(tet, 3)
     }
+
+    /// Flips in a vertex using one big mega flip.
+    /// The boundary must be manifold.
+    /// This does not check that negative-volume tets won't be created. Be careful.
+    pub fn flip_in_vertex_unchecked(&mut self, vertex: VertexId, boundary: &mut [TetWalker], mut enclosure: FnvHashSet<TetId>) where T: Clone {
+        // Delete tets that don't even have a triangle on the boundary
+        for walker in &*boundary {
+            enclosure.remove(&walker.id());
+        }
+        for id in enclosure {
+            self.tets.remove(id);
+        }
+
+        // Build adjacency map; will need for internal links.
+        // This is why the boundary must be manifold.
+        let mut edge_map = FnvHashMap::<[VertexId; 2], TetWalker>::default();
+        edge_map.reserve(3 * boundary.len());
+        let mut ids = FnvHashSet::<TetId>::default();
+
+        // Check for tets that need to be duplicated and make necessary clones
+        for walker in boundary.iter_mut() {
+            if ids.contains(&walker.id()) {
+                let id = self.tets.insert(self[walker.id()].clone());
+                let adj = walker.to_adj_ae(&self);
+                self.tets[adj.id()].opp_tets[adj.edge as usize % 4].tet = id;
+                walker.tet = id;
+            }
+            ids.insert(walker.id());
+        }
+
+        for walker in &*boundary {
+            // Don't forget the new vertex!
+            self.tets[walker.id()].vertices[walker.edge as usize % 4] = vertex;
+            let tri = walker.tri(&self);
+            edge_map.insert([tri[0], tri[1]], *walker);
+            edge_map.insert([tri[1], tri[2]], walker.to_nfe());
+            edge_map.insert([tri[2], tri[0]], walker.to_pfe());
+        }
+
+        // Internal-external links didn't need changing.
+        // External-internal links got fixed.
+        // Now fix internal links.
+        for ([v0, v1], walker) in &edge_map {
+            let walker = walker.to_twin_edge();
+            let adj = edge_map[&[*v1, *v0]].to_twin_edge();
+
+            // Calling `walker.to_adj(&self)` should give `adj`
+            self.tets[walker.id()].opp_tets[walker.edge as usize % 4] = match walker.edge / 4 {
+                0 => adj,
+                1 => adj.to_nfe(),
+                2 => adj.to_pfe(),
+                _ => unreachable!(),
+            };
+        }
+    }
 }
 
 impl<V, T> Index<VertexId> for Tets<V, T> {
@@ -1021,23 +1082,6 @@ mod tests {
                 }
             }
         }
-
-        for perm in 0..12 {
-            print!("Perm {:2}:", perm);
-            for i in 0..12 {
-                print!("{:3}", TetWalker::PERMUTATION_FWD[perm][i]);
-            }
-            println!();
-        }
-        println!();
-
-        for perm in 0..12 {
-            print!("Perm {:2}:", perm);
-            for i in 0..12 {
-                print!("{:3}", TetWalker::PERMUTATION_INV[perm][i]);
-            }
-            println!();
-        }
     }
 
     #[test]
@@ -1222,5 +1266,113 @@ mod tests {
         ].into_iter().collect::<FnvHashSet<_>>());
 
         assert_eq!(enclosed, vec![t(0), t(5), t(6), t(7)].into_iter().collect::<FnvHashSet<_>>());
+    }
+
+    #[test]
+    fn test_flip_in_vertex_unchecked_1_4() {
+        let mut mesh = default_tets();
+        mesh.vertices.insert(Vertex::new(
+            TetWalker::new(TetId::invalid(), 0),
+            Pt3::origin(),
+            (),
+        ));
+        let (mut boundary, enclosed) = mesh.walker_from_tet(t(1))
+            .boundary_and_enclosed(&mesh, |id| id == t(1));
+        mesh.flip_in_vertex_unchecked(v(4), &mut boundary, enclosed);
+
+        for tet in 0..8 {
+            for i in 0..12 {
+                let walker = TetWalker::new(t(tet), i);
+                let mut vertices = walker.tet(&mesh);
+
+                if !vertices[..3].contains(&v(0)) {
+                    vertices.swap(0, 1);
+
+                    if vertices[3] == v(4) {
+                        // Internal to external link
+                        vertices[3] = v(0);
+                    } else if vertices[3] == v(0) {
+                        // External to internal link
+                        vertices[3] = v(4);
+                    } else {
+                        // Internal link
+                        vertices[3] = v((Tets::<(), ()>::GHOST.0 as u64 + 10
+                            - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
+                            as IdType);
+                    }
+                    assert_eq!(
+                        walker.to_adj(&mesh).tet(&mesh),
+                        vertices,
+                        "Flipping {:?}, expected {:?}, got {:?}",
+                        walker.tet(&mesh),
+                        vertices,
+                        walker.to_adj(&mesh).tet(&mesh)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_flip_in_vertex_unchecked_2_6() {
+        let mut mesh = default_tets();
+        for i in 0..2 {
+            mesh.vertices.insert(Vertex::new(
+                TetWalker::new(TetId::invalid(), 0),
+                Pt3::origin(),
+                (),
+            ));
+        }
+
+        mesh.walker_from_tet(t(0)).flip14_unchecked(&mut mesh, v(4));
+        let (mut boundary, enclosed) = mesh.walker_from_tet(t(1))
+            .boundary_and_enclosed(&mesh, |t| {
+                let vs = mesh[t].vertices();
+                vs.contains(&v(1)) && vs.contains(&v(2)) && vs.contains(&v(3))
+            });
+
+        // 2-to-6 flip.
+        mesh.flip_in_vertex_unchecked(v(5), &mut boundary, enclosed);
+
+        for tet in 0..12 {
+            for i in 0..12 {
+                let walker = TetWalker::new(t(tet), i);
+                let mut vertices = walker.tet(&mesh);
+
+                // Resultant tet or opposite resultant tet
+                if vertices[3] == v(0) || vertices.contains(&v(5)) {
+                    vertices.swap(0, 1);
+
+                    if vertices[3] == v(5) {
+                        // Internal to external link
+                        vertices[3] = v(0);
+                    } else if vertices[3] == v(0) {
+                        // External to internal link
+                        vertices[3] = v(5);
+                    } else {
+                        // Internal link
+                        vertices[3] = if vertices[3] == v(4) {
+                            Tets::<(), ()>::GHOST
+                        } else if vertices[3] == Tets::<(), ()>::GHOST {
+                            v(4)
+                        } else {
+                            v(6 - vertices
+                                .iter()
+                                .map(|v| v.0)
+                                .filter(|n| *n == 1 || *n == 2 || *n == 3)
+                                .sum::<u32>())
+                        };
+                    }
+                    assert_eq!(
+                        walker.to_adj(&mesh).tet(&mesh),
+                        vertices,
+                        "Flipping {:?}, expected {:?}, got {:?}",
+                        walker.tet(&mesh),
+                        vertices,
+                        walker.to_adj(&mesh).tet(&mesh)
+                    );
+                }
+            }
+        }
     }
 }
