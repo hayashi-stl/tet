@@ -1,10 +1,10 @@
-use std::{collections::VecDeque, hash::{Hash, Hasher}};
+use std::{collections::VecDeque, hash::{Hash, Hasher}, path::Path};
 use std::collections::hash_set;
 use std::ops::Index;
 use std::iter::{self, Map};
 use float_ord::FloatOrd;
 
-use crate::id_map::{IdMap, IdType};
+use crate::{Pt1, id_map::{IdMap, IdType}};
 use crate::{Pt3, TetId, VertexId, Vec3};
 use prv::{TetEq, SecondEq};
 use fnv::{FnvHashMap, FnvHashSet};
@@ -385,6 +385,13 @@ impl TetWalker {
         // The vertex didn't have a tet before.
         mesh.vertices[vertex].tet = self;
 
+        // Just in case of dangling vertex-tet reference
+        let vs = mesh.tets[id0].vertices();
+        mesh.vertices.get_mut(vs[0]).map(|v| v.tet = TetWalker::new(id2, 3) );
+        mesh.vertices.get_mut(vs[1]).map(|v| v.tet = TetWalker::new(id3, 2) );
+        mesh.vertices.get_mut(vs[2]).map(|v| v.tet = TetWalker::new(id0, 1) );
+        mesh.vertices.get_mut(vs[3]).map(|v| v.tet = TetWalker::new(id1, 0) );
+
         // Update tets
         // Note that adjacent tets need to change their opposite tet ids,
         // but not their opposite tet edge indexes because they refer to the same face.
@@ -484,6 +491,13 @@ impl TetWalker {
         // Introduce the 3 new tets
         let ([v1, v0, v2, v3], v4) = (self.tet(&mesh), other.fourth(&mesh));
 
+        // Just in case of dangling vertex-tet reference
+        mesh.vertices.get_mut(v0).map(|v| v.tet = TetWalker::new(id0, 3) );
+        mesh.vertices.get_mut(v1).map(|v| v.tet = TetWalker::new(id1, 3) );
+        mesh.vertices.get_mut(v2).map(|v| v.tet = TetWalker::new(id2, 3) );
+        mesh.vertices.get_mut(v3).map(|v| v.tet = TetWalker::new(id0, 1) );
+        mesh.vertices.get_mut(v4).map(|v| v.tet = TetWalker::new(id0, 0) );
+
         let tet = &mut mesh.tets[id0];
         tet.vertices = [v0, v1, v3, v4];
         tet.opp_tets[0] = TetWalker::new(id1, 1);
@@ -574,6 +588,13 @@ impl TetWalker {
 
         // Introduce the 2 new tets
         let ([v3, v4, v1, v0], v2) = (self.tet(&mesh), other1.fourth(&mesh));
+
+        // Just in case of dangling vertex-tet reference
+        mesh.vertices.get_mut(v0).map(|v| v.tet = TetWalker::new(id0, 3) );
+        mesh.vertices.get_mut(v1).map(|v| v.tet = TetWalker::new(id0, 7) );
+        mesh.vertices.get_mut(v2).map(|v| v.tet = TetWalker::new(id0, 11) );
+        mesh.vertices.get_mut(v3).map(|v| v.tet = TetWalker::new(id0, 0) );
+        mesh.vertices.get_mut(v4).map(|v| v.tet = TetWalker::new(id1, 0) );
 
         let tet = &mut mesh.tets[id0];
         tet.vertices = [v0, v1, v2, v3];
@@ -779,7 +800,33 @@ impl<V, T> Tets<V, T> {
 
     /// Gets the edge target vertices from a vertex.
     pub fn vertex_targets<'a>(&'a self, vertex: VertexId) -> VertexTargets<'a, V, T> {
-        self.dfs_vertex::<SecondEq<'a, V, T>>(vertex).into_iter().map(|e| e.1.second(e.0))
+        let mut walkers = FnvHashSet::default();
+        let mut to_search = vec![self.walker_from_vertex(vertex)];
+
+        // DFS
+        while let Some(walker) = to_search.pop() {
+            if walkers.insert(SecondEq::from((self, walker))) {
+                // Search is different; search 1 edge radius at a time.
+                let mut walker = walker.to_adj(self).to_nfe();
+                let start = walker;
+                while {
+                    to_search.push(walker);
+                    walker = walker.to_perm(Permutation::_3021).to_adj(self);
+                    walker != start
+                } {}
+            }
+        }
+
+        walkers.into_iter().map(|e| e.1.second(e.0))
+    }
+
+    /// Gets the position of a vertex. The ghost vertex is at infinity.
+    pub fn vertex_position(&self, vertex: VertexId) -> Pt3 {
+        if vertex == Self::GHOST {
+            Pt1::new(f64::INFINITY).xxx()
+        } else {
+            self[vertex].position()
+        }
     }
 
     /// Gets the distance between two vertices.
@@ -834,6 +881,7 @@ impl<V, T> Tets<V, T> {
 
     /// Flips in a vertex using one big mega flip.
     /// The boundary must be manifold.
+    /// For now, no vertex can be completely enclosed.
     /// This does not check that negative-volume tets won't be created. Be careful.
     pub fn flip_in_vertex_unchecked(&mut self, vertex: VertexId, boundary: &mut [TetWalker], mut enclosure: FnvHashSet<TetId>) where T: Clone {
         // Delete tets that don't even have a triangle on the boundary
@@ -867,6 +915,11 @@ impl<V, T> Tets<V, T> {
             if self[vertex].tet.id() == TetId::invalid() {
                 self.vertices[vertex].tet = walker.to_perm(Permutation::_3210);
             }
+            // Other vertices, just in case their references are now dangling
+            let tri = walker.tri(self);
+            self.vertices.get_mut(tri[0]).map(|v| v.tet = *walker);
+            self.vertices.get_mut(tri[1]).map(|v| v.tet = walker.to_nfe());
+            self.vertices.get_mut(tri[2]).map(|v| v.tet = walker.to_pfe());
 
             let tri = walker.tri(&self);
             edge_map.insert([tri[0], tri[1]], *walker);
@@ -934,7 +987,7 @@ impl<V, T> Tets<V, T> {
             let vs = self[*tet].vertices();
             self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
         }).unwrap_or_else(|| {
-            // Rare case
+            // Rare case because the distance comparisons are not robust
             let mut checked = self.vertex_tets(closest).collect::<FnvHashSet<_>>(); // already checked
             let mut tets = checked.iter().flat_map(|tet| self.adjacent_tets(*tet).to_vec())
                 .collect::<FnvHashSet<_>>().into_iter().collect::<VecDeque<_>>();
@@ -948,7 +1001,7 @@ impl<V, T> Tets<V, T> {
                 }
             }
 
-            panic!("Expected some tet to stop being Delaunay when inserting vertex {}", id)
+            panic!("Expected some tet to stop being Delaunay when inserting vertex {} at {:?}", id, self[id].position())
         });
 
         // Find all non-Delaunay tets
@@ -962,6 +1015,43 @@ impl<V, T> Tets<V, T> {
         self.flip_in_vertex_unchecked(id, &mut boundary, enclosed);
 
         id
+    }
+
+    #[cfg(feature = "obj")]
+    pub fn export_debug_obj<P: AsRef<Path>>(&self, path: P) {
+        let solid_tets = || self.tets.values().filter(|t| !t.vertices().contains(&Self::GHOST)).enumerate();
+
+        let obj = obj::ObjData {
+            position: solid_tets().flat_map(|(_, t)| t.vertices().to_vec())
+                .map(|v| {
+                    let pos = self[v].position;
+                    [pos.x as f32, pos.y as f32, pos.z as f32]
+                }).collect(),
+            texture: vec![],
+            normal: vec![],
+
+            objects: vec![obj::Object {
+                name: "Tet Mesh".to_owned(),
+                groups: vec![obj::Group {
+                    name: "Tet Group".to_owned(),
+                    index: 0,
+                    material: None,
+                    polys: solid_tets().flat_map(|(i, t)| vec![
+                        [4 * i + 0, 4 * i + 1, 4 * i + 2],
+                        [4 * i + 3, 4 * i + 2, 4 * i + 1],
+                        [4 * i + 2, 4 * i + 3, 4 * i + 0],
+                        [4 * i + 1, 4 * i + 0, 4 * i + 3],
+                    ]).map(|[a, b, c]| obj::SimplePolygon(vec![
+                        obj::IndexTuple(a, None, None),
+                        obj::IndexTuple(b, None, None),
+                        obj::IndexTuple(c, None, None),
+                    ])).collect::<Vec<_>>()
+                }],
+            }],
+
+            material_libs: vec![],
+        };
+        obj.save(path).unwrap();
     }
 }
 

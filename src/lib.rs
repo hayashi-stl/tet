@@ -1,8 +1,11 @@
 mod id_map;
 pub mod tet;
 
-use nalgebra::{Point3, Vector3};
+pub use tet::{Tets, TetWalker};
 
+use nalgebra::{Point1, Point3, Vector3};
+
+type Pt1 = Point1<f64>;
 type Pt3 = Point3<f64>;
 type Vec3 = Vector3<f64>;
 
