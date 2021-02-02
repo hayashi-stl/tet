@@ -1,9 +1,10 @@
 mod id_map;
 pub mod tet;
 
-use nalgebra::Point3;
+use nalgebra::{Point3, Vector3};
 
 type Pt3 = Point3<f64>;
+type Vec3 = Vector3<f64>;
 
 #[macro_export]
 #[doc(hidden)]
