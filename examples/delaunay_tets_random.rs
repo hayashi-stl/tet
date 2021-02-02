@@ -20,6 +20,8 @@ fn main() {
             (Pt3::new(vals[0], vals[1], vals[2]), ())
         });
 
+    let now = std::time::Instant::now();
     let mesh = Tets::<(), ()>::delaunay_from_vertices(data, || ());
+    println!("Generated in {}ms", now.elapsed().as_millis());
     println!("Num tets including ghosts: {:?}", mesh.num_tets());
 }

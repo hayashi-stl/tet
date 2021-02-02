@@ -14,7 +14,7 @@ debug = true
 [dependencies]
 fnv = "1.0"
 nalgebra = "0.24"
-simplicity = "0.3"
+simplicity = "0.4"
 float-ord = "0.2"
 hilbert = "0.1.1"
 obj = { version = "0.10.2", optional = true }

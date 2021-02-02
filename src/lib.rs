@@ -2,7 +2,7 @@ mod id_map;
 mod util;
 pub mod tet;
 
-pub use tet::{Tets, TetWalker};
+pub use crate::tet::{Tets, TetWalker};
 
 use nalgebra::{Point1, Point3, Vector3};
 

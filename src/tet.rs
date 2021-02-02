@@ -802,35 +802,26 @@ impl<V, T> Tets<V, T> {
 
     /// Gets the tet walkers that start from a vertex.
     /// Each tet walker is for a unique tet and has the vertex as its first vertex.
-    pub fn walkers_from_vertex(&self, vertex: VertexId) -> WalkersFromVertex {
-        self.dfs_vertex::<TetEq>(vertex).into_iter().map(|t| t.0)
+    pub fn walkers_from_vertex<'a>(&'a self, vertex: VertexId) -> WalkersFromVertex<'a, V, T> {
+        WalkersFromVertex {
+            mesh: self,
+            visited: FnvHashSet::default(),
+            to_search: vec![self.walker_from_vertex(vertex)],
+        }
     }
 
     /// Gets the tets that contain a vertex.
-    pub fn vertex_tets(&self, vertex: VertexId) -> VertexTets {
-        self.dfs_vertex::<TetEq>(vertex).into_iter().map(|t| t.0.id())
+    pub fn vertex_tets<'a>(&'a self, vertex: VertexId) -> VertexTets<'a, V, T> {
+        self.walkers_from_vertex(vertex).map(|walker| walker.id())
     }
 
     /// Gets the edge target vertices from a vertex.
     pub fn vertex_targets<'a>(&'a self, vertex: VertexId) -> VertexTargets<'a, V, T> {
-        let mut walkers = FnvHashSet::default();
-        let mut to_search = vec![self.walker_from_vertex(vertex)];
-
-        // DFS
-        while let Some(walker) = to_search.pop() {
-            if walkers.insert(SecondEq::from((self, walker))) {
-                // Search is different; search 1 edge radius at a time.
-                let mut walker = walker.to_adj(self).to_nfe();
-                let start = walker;
-                while {
-                    to_search.push(walker);
-                    walker = walker.to_perm(Permutation::_3021).to_adj(self);
-                    walker != start
-                } {}
-            }
+        VertexTargets {
+            mesh: self,
+            visited: FnvHashSet::default(),
+            to_search: vec![self.walker_from_vertex(vertex)],
         }
-
-        walkers.into_iter().map(|e| e.1.second(e.0))
     }
 
     /// Gets the position of a vertex. The ghost vertex is at infinity.
@@ -962,14 +953,15 @@ impl<V, T> Tets<V, T> {
     /// `VertexId(i)` is the index to the `i`th vertex returned from the iterator.
     pub fn delaunay_from_vertices<I: IntoIterator<Item = (Pt3, V)>>(vertices: I, default_tet: fn() -> T) -> Self where V: Clone, T: Clone {
         let mut vertices = util::hilbert_sort(vertices);
-        let v0 = vertices.next().unwrap();
-        let v1 = vertices.next().unwrap();
-        let v2 = vertices.next().unwrap();
-        let v3 = vertices.next().unwrap();
+        let mut drain = vertices.drain(0..4);
+        let v0 = drain.next().unwrap();
+        let v1 = drain.next().unwrap();
+        let v2 = drain.next().unwrap();
+        let v3 = drain.next().unwrap();
+        std::mem::drop(drain);
         let v3_id = v3.0;
 
         let mut mesh = Self::with_ids([v0, v1, v2, v3], default_tet);
-        let vertices = vertices.collect::<Vec<_>>();
         // include v3's id to avoid indexing out of bounds
         let ids = iter::once(v3_id).chain(vertices.iter().map(|v| v.0)).collect::<Vec<_>>();
 
@@ -1100,13 +1092,63 @@ impl<V, T> Index<TetId> for Tets<V, T> {
 
 /// Iterates over tet walkers from a vertex.
 /// Each tet walker is for a unique tetrahedron and has the vertex as its first vertex.
-pub type WalkersFromVertex = Map<hash_set::IntoIter<TetEq>, fn(TetEq) -> TetWalker>;
+#[derive(Clone, Debug)]
+pub struct WalkersFromVertex<'a, V, T> {
+    mesh: &'a Tets<V, T>,
+    visited: FnvHashSet<TetId>,
+    to_search: Vec<TetWalker>,
+}
+
+impl<'a, V, T> Iterator for WalkersFromVertex<'a, V, T> {
+    type Item = TetWalker;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // DFS
+        while let Some(walker) = self.to_search.pop() {
+            if self.visited.insert(walker.id()) {
+                self.to_search.push(walker.to_perm(Permutation::_1032).to_adj(self.mesh));
+                self.to_search.push(walker.to_perm(Permutation::_2013).to_adj(self.mesh));
+                self.to_search.push(walker.to_perm(Permutation::_3021).to_adj(self.mesh));
+                return Some(walker)
+            }
+        }
+        None
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VertexTargets<'a, V, T> {
+    mesh: &'a Tets<V, T>,
+    visited: FnvHashSet<VertexId>,
+    to_search: Vec<TetWalker>,
+}
+
+impl<'a, V, T> Iterator for VertexTargets<'a, V, T> {
+    type Item = VertexId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(walker) = self.to_search.pop() {
+            let target = walker.second(self.mesh);
+
+            if self.visited.insert(target) {
+                // Search is different; search 1 edge radius at a time.
+                let mut walker = walker.to_adj(self.mesh).to_nfe();
+                let start = walker;
+                while {
+                    self.to_search.push(walker);
+                    walker = walker.to_perm(Permutation::_3021).to_adj(self.mesh);
+                    walker != start
+                } {}
+
+                return Some(target);
+            }
+        }
+        None
+    }
+}
 
 /// Iterates over tets containing a vertex.
-pub type VertexTets = Map<hash_set::IntoIter<TetEq>, fn(TetEq) -> TetId>;
-
-/// Iterates over edge targets of a vertex.
-pub type VertexTargets<'a, V, T> = Map<hash_set::IntoIter<SecondEq<'a, V, T>>, fn(SecondEq<'a, V, T>) -> VertexId>;
+pub type VertexTets<'a, V, T> = Map<WalkersFromVertex<'a, V, T>, fn(TetWalker) -> TetId>;
 
 mod prv {
     use super::*;
