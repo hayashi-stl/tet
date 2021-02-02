@@ -6,6 +6,7 @@ use float_ord::FloatOrd;
 
 use crate::{Pt1, id_map::{IdMap, IdType}};
 use crate::{Pt3, TetId, VertexId, Vec3};
+use crate::util;
 use prv::{TetEq, SecondEq};
 use fnv::{FnvHashMap, FnvHashSet};
 use simplicity as sim;
@@ -682,7 +683,20 @@ impl<V, T> Tets<V, T> {
     /// The vertex ids are VertexId(i) for i in 0..4.
     ///
     /// The solid tet id is TetId(0) and the ghost tet ids are TetId(i) for i in 1..5.
-    fn new(vertices: [(Pt3, V); 4], default_tet: fn() -> T) -> Self
+    pub fn new(vertices: [(Pt3, V); 4], default_tet: fn() -> T) -> Self
+    where
+        V: Clone,
+        T: Clone,
+    {
+        Self::with_ids([
+            (VertexId(0), vertices[0].0, vertices[0].1.clone()),
+            (VertexId(1), vertices[1].0, vertices[1].1.clone()),
+            (VertexId(2), vertices[2].0, vertices[2].1.clone()),
+            (VertexId(3), vertices[3].0, vertices[3].1.clone()),
+        ], default_tet)
+    }
+
+    fn with_ids(vertices: [(VertexId, Pt3, V); 4], default_tet: fn() -> T) -> Self
     where
         V: Clone,
         T: Clone,
@@ -694,20 +708,19 @@ impl<V, T> Tets<V, T> {
         };
 
         // Make sure the tet is oriented positive
-        let swap = !sim::orient_3d(&vertices, |l, i| l[i].0.coords, 0, 1, 2, 3);
+        let swap = !sim::orient_3d(&vertices, |l, i| l[i].1.coords, 0, 1, 2, 3);
 
         let tw = |id, edge| TetWalker::new(TetId(id), edge);
         tets.vertices
-            .extend_values(vertices.iter().enumerate().map(|(i, (pos, v))| {
+            .extend(vertices.iter().enumerate().map(|(i, (id, pos, v))| {
                 // I'm adding the solid (not ghost) tet first, so TetId(0) is fine here
-                Vertex::new(tw(0, 3 - i as IdType), *pos, v.clone())
-            }))
-            .for_each(|_| {});
+                (*id, Vertex::new(tw(0, 3 - i as IdType), *pos, v.clone()))
+            }));
         let vi = [
-            VertexId(0),
-            VertexId(1),
-            VertexId(2 + swap as IdType),
-            VertexId(3 - swap as IdType),
+            vertices[0].0,
+            vertices[1].0,
+            vertices[2 + swap as usize].0,
+            vertices[3 - swap as usize].0,
             Self::GHOST,
         ];
 
@@ -948,15 +961,20 @@ impl<V, T> Tets<V, T> {
     /// because it takes 4 vertices to make a tet.
     /// `VertexId(i)` is the index to the `i`th vertex returned from the iterator.
     pub fn delaunay_from_vertices<I: IntoIterator<Item = (Pt3, V)>>(vertices: I, default_tet: fn() -> T) -> Self where V: Clone, T: Clone {
-        let mut vertices = vertices.into_iter();
+        let mut vertices = util::hilbert_sort(vertices);
         let v0 = vertices.next().unwrap();
         let v1 = vertices.next().unwrap();
         let v2 = vertices.next().unwrap();
         let v3 = vertices.next().unwrap();
+        let v3_id = v3.0;
 
-        let mut mesh = Self::new([v0, v1, v2, v3], default_tet);
-        for (position, value) in vertices {
-            mesh.add_vertex_delaunay(position, value, None);
+        let mut mesh = Self::with_ids([v0, v1, v2, v3], default_tet);
+        let vertices = vertices.collect::<Vec<_>>();
+        // include v3's id to avoid indexing out of bounds
+        let ids = iter::once(v3_id).chain(vertices.iter().map(|v| v.0)).collect::<Vec<_>>();
+
+        for (i, (id, position, value)) in vertices.into_iter().enumerate() {
+            mesh.add_vertex_delaunay_internal(Some(id), position, value, ids[i]);
         }
 
         mesh
@@ -964,12 +982,19 @@ impl<V, T> Tets<V, T> {
 
     /// Add a vertex to keep the Delaunay property, assuming this is a Delaunay tetrahedralization.
     /// Returns the new vertex id.
-    ///
-    /// `search_start` is the vertex to start searching for a vertex with a tet that should be deleted.
-    pub fn add_vertex_delaunay(&mut self, position: Pt3, value: V, search_start: Option<VertexId>) -> VertexId where T: Clone {
-        let mut closest = search_start.unwrap_or_else(|| self.vertices.keys().next().unwrap());
+    pub fn add_vertex_delaunay(&mut self, position: Pt3, value: V) -> VertexId where T: Clone {
+        self.add_vertex_delaunay_internal(None, position, value, self.vertices.keys().next().unwrap())
+    }
 
-        let id = self.vertices.insert(Vertex::new(TetWalker::new(TetId::invalid(), 0), position, value));
+    pub fn add_vertex_delaunay_internal(&mut self, id: Option<VertexId>, position: Pt3, value: V, search_start: VertexId) -> VertexId where T: Clone {
+        let mut closest = search_start;
+
+        let id = if let Some(id) = id {
+            self.vertices.insert_with_key(id, Vertex::new(TetWalker::new(TetId::invalid(), 0), position, value));
+            id
+        } else {
+            self.vertices.insert(Vertex::new(TetWalker::new(TetId::invalid(), 0), position, value))
+        };
 
         // Go to vertex closest to position
         while let Some(closer) = {

@@ -1,4 +1,5 @@
 mod id_map;
+mod util;
 pub mod tet;
 
 pub use tet::{Tets, TetWalker};
