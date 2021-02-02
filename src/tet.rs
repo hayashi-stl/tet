@@ -1,8 +1,9 @@
-use std::{collections::VecDeque, hash::{Hash, Hasher}, path::Path};
+use std::{cell::Cell, collections::VecDeque, hash::{Hash, Hasher}, path::Path};
 use std::collections::hash_set;
 use std::ops::Index;
 use std::iter::{self, Map};
 use float_ord::FloatOrd;
+use bitflags::bitflags;
 
 use crate::{Pt1, id_map::{IdMap, IdType}};
 use crate::{Pt3, TetId, VertexId, Vec3};
@@ -39,6 +40,19 @@ impl<V> Vertex<V> {
     }
 }
 
+bitflags! {
+    struct TetFlags: u32 {
+        /// Part of the intermediate boundary in boundary_and_enclosed
+        const BOUND_IMM_0 = 1 << 0;
+        const BOUND_IMM_1 = 1 << 1;
+        const BOUND_IMM_2 = 1 << 2;
+        const BOUND_IMM_3 = 1 << 3;
+
+        /// Whether this tet is part of the boundary. Used in flip_in_vertex_unchecked.
+        const BOUNDARY = 1 << 4;
+    }
+}
+
 /// A tet stores the vertices that it's part of (in the correct orientation)
 /// and the opposite tets of each vertex.
 ///
@@ -53,6 +67,7 @@ impl<V> Vertex<V> {
 pub struct Tet<T> {
     vertices: [VertexId; 4],
     opp_tets: [TetWalker; 4],
+    flags: Cell<TetFlags>,
     value: T,
 }
 
@@ -61,6 +76,7 @@ impl<T> Tet<T> {
         Self {
             vertices,
             opp_tets,
+            flags: Cell::new(TetFlags::empty()),
             value,
         }
     }
@@ -73,6 +89,14 @@ impl<T> Tet<T> {
     /// Gets the value of this tet.
     pub fn value(&self) -> &T {
         &self.value
+    }
+
+    fn set_flags(&self, flag: TetFlags) {
+        self.flags.set(self.flags.get() | flag);
+    }
+
+    fn clear_flags(&self, flag: TetFlags) {
+        self.flags.set(self.flags.get() & !flag);
     }
 }
 
@@ -623,25 +647,38 @@ impl TetWalker {
         self,
         mesh: &Tets<V, T>,
         mut pred: F,
-    ) -> (Vec<TetWalker>, FnvHashSet<TetId>) {
-        let mut bound_imm = FnvHashSet::default();
-        let mut boundary = vec![];
-        let mut enclosed = FnvHashSet::default();
-        enclosed.insert(self.id());
-
+    ) -> (Vec<TetWalker>, Vec<TetId>) {
         // Initialize intermediate boundary
-        bound_imm.insert(BoundaryTri(self));
-        bound_imm.insert(BoundaryTri(self.to_opp_edge()));
-        bound_imm.insert(BoundaryTri(self.to_twin_edge()));
-        bound_imm.insert(BoundaryTri(self.to_perm(Permutation::_3210)));
+        let mut bound_imm = vec![
+            TetWalker::new(self.id(), 0),
+            TetWalker::new(self.id(), 1),
+            TetWalker::new(self.id(), 2),
+            TetWalker::new(self.id(), 3),
+        ];
+        mesh.tets[self.id()].set_flags(TetFlags::BOUND_IMM_0 | TetFlags::BOUND_IMM_1 | TetFlags::BOUND_IMM_2 | TetFlags::BOUND_IMM_3);
+
+        let mut boundary = vec![];
+        let mut enclosed = vec![self.id()];
+
+        let edge_flag = |edge| unsafe {
+            // Safety: tri.edge % 4 is in 0..4, and TetFlags::BOUND_IMM_0.bits << i for i in 0..4 is a valid flag.
+            TetFlags::from_bits_unchecked(TetFlags::BOUND_IMM_0.bits << edge % 4)
+        };
 
         // Extend intermediate boundary
-        while let Some(tri) = bound_imm.iter().next().copied() {
-            bound_imm.remove(&tri);
+        while let Some(tri) = bound_imm.pop() {
+            // Clear flag
+            let tet = &mesh.tets[tri.id()];
+            if !tet.flags.get().intersects(edge_flag(tri.edge)) {
+                // Triangle was removed by twin triangle.
+                continue;
+            }
+            tet.clear_flags(edge_flag(tri.edge));
 
-            let adj = tri.0.to_adj_ae(&mesh);
+            let adj = tri.to_adj_ae(&mesh);
             if pred(adj.id()) {
-                enclosed.insert(adj.id());
+                // Each tet should be visited at most once.
+                enclosed.push(adj.id());
 
                 // Local extension
                 for walker in [
@@ -651,16 +688,24 @@ impl TetWalker {
                 ]
                 .iter()
                 {
-                    if !bound_imm.remove(&BoundaryTri(walker.to_adj_ae(&mesh))) {
-                        bound_imm.insert(BoundaryTri(*walker));
+                    let twin = walker.to_adj_ae(&mesh);
+                    if mesh.tets[twin.id()].flags.get().intersects(edge_flag(twin.edge)) {
+                        mesh.tets[twin.id()].clear_flags(edge_flag(twin.edge));
+                    } else {
+                        mesh.tets[walker.id()].set_flags(edge_flag(walker.edge));
+                        bound_imm.push(*walker);
                     }
                 }
             } else {
                 // Reached edge of boundary
-                boundary.push(tri.0);
+                boundary.push(tri);
             }
         }
 
+        debug_assert!(
+            enclosed.len() == enclosed.iter().collect::<FnvHashSet<_>>().len(),
+            "Enclosure contains repeat elements unexpectedly."
+        );
         (boundary, enclosed)
     }
 }
@@ -887,13 +932,17 @@ impl<V, T> Tets<V, T> {
     /// The boundary must be manifold.
     /// For now, no vertex can be completely enclosed.
     /// This does not check that negative-volume tets won't be created. Be careful.
-    pub fn flip_in_vertex_unchecked(&mut self, vertex: VertexId, boundary: &mut [TetWalker], mut enclosure: FnvHashSet<TetId>) where T: Clone {
+    pub fn flip_in_vertex_unchecked(&mut self, vertex: VertexId, boundary: &mut [TetWalker], enclosure: &[TetId]) where T: Clone {
         // Delete tets that don't even have a triangle on the boundary
+        // Mark boundary
         for walker in &*boundary {
-            enclosure.remove(&walker.id());
+            self.tets[walker.id()].set_flags(TetFlags::BOUNDARY);
         }
+        // Removed unmarked enclosure
         for id in enclosure {
-            self.tets.remove(id);
+            if !self.tets[*id].flags.get().intersects(TetFlags::BOUNDARY) {
+                self.tets.remove(*id);
+            }
         }
 
         // Build adjacency map; will need for internal links.
@@ -904,6 +953,9 @@ impl<V, T> Tets<V, T> {
 
         // Check for tets that need to be duplicated and make necessary clones
         for walker in boundary.iter_mut() {
+            // Also unmark boundary
+            self.tets[walker.id()].clear_flags(TetFlags::BOUNDARY);
+
             if ids.contains(&walker.id()) {
                 let id = self.tets.insert(self[walker.id()].clone());
                 let adj = walker.to_adj_ae(&self);
@@ -1029,7 +1081,7 @@ impl<V, T> Tets<V, T> {
             });
 
         // Add the new vertex
-        self.flip_in_vertex_unchecked(id, &mut boundary, enclosed);
+        self.flip_in_vertex_unchecked(id, &mut boundary, &enclosed);
 
         id
     }
@@ -1615,7 +1667,7 @@ mod tests {
             .boundary_and_enclosed(&mesh, |_| true);
 
         assert_eq!(boundary, vec![]);
-        assert_eq!(enclosed, mesh.tets.keys().collect::<FnvHashSet<_>>());
+        assert_eq!(enclosed.into_iter().collect::<FnvHashSet<_>>(), mesh.tets.keys().collect::<FnvHashSet<_>>());
     }
 
     #[test]
@@ -1639,7 +1691,7 @@ mod tests {
             BoundaryTri(walker.to_perm(Permutation::_3210)),
         ].into_iter().collect::<FnvHashSet<_>>());
 
-        assert_eq!(enclosed, std::iter::once(walker.id()).collect::<FnvHashSet<_>>());
+        assert_eq!(enclosed, vec![walker.id()]);
     }
 
     #[test]
@@ -1663,7 +1715,7 @@ mod tests {
             [v(0), v(3), v(1)],
         ].into_iter().collect::<FnvHashSet<_>>());
 
-        assert_eq!(enclosed, vec![t(0), t(5), t(6), t(7)].into_iter().collect::<FnvHashSet<_>>());
+        assert_eq!(enclosed.into_iter().collect::<FnvHashSet<_>>(), vec![t(0), t(5), t(6), t(7)].into_iter().collect::<FnvHashSet<_>>());
     }
 
     #[test]
@@ -1676,7 +1728,7 @@ mod tests {
         ));
         let (mut boundary, enclosed) = mesh.walker_from_tet(t(1))
             .boundary_and_enclosed(&mesh, |id| id == t(1));
-        mesh.flip_in_vertex_unchecked(v(4), &mut boundary, enclosed);
+        mesh.flip_in_vertex_unchecked(v(4), &mut boundary, &enclosed);
 
         for tet in 0..8 {
             for i in 0..12 {
@@ -1730,7 +1782,7 @@ mod tests {
             });
 
         // 2-to-6 flip.
-        mesh.flip_in_vertex_unchecked(v(5), &mut boundary, enclosed);
+        mesh.flip_in_vertex_unchecked(v(5), &mut boundary, &enclosed);
 
         for tet in 0..12 {
             for i in 0..12 {
