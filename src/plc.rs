@@ -1,6 +1,9 @@
 use crate::{Pt3, VertexId};
 use crate::id_map::{self, IdMap};
 
+use fnv::FnvHashMap;
+use std::{collections::hash_map::Entry, iter};
+
 crate::id! {
     /// A PLC edge id
     pub struct EdgeId
@@ -28,6 +31,8 @@ pub struct Vertex<V> {
     edge_out: EdgeId,
     /// An edge that it's the target of
     edge_in: EdgeId,
+    /// The face ring that it basically is if it's an isolated vertex of a face.
+    ring: FaceRingId,
     position: Pt3,
     value: V,
 }
@@ -37,6 +42,7 @@ impl<V> Vertex<V> {
         Self {
             edge_out: EdgeId::invalid(),
             edge_in: EdgeId::invalid(),
+            ring: FaceRingId::invalid(),
             position,
             value,
         }
@@ -115,11 +121,18 @@ impl FaceEdge {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Element {
+    FaceEdge(FaceEdgeId),
+    Vertex(VertexId),
+}
+
 /// A ring of edges around a PLC face.
 #[derive(Clone, Debug)]
 pub struct FaceRing {
-    /// A face edge that belongs to this ring
-    face_edge: FaceEdgeId,
+    /// A face edge or vertex that belongs to this ring.
+    /// This represents an isolated vertex on a face if it's a vertex.
+    element: Element,
     face: FaceId,
     next: FaceRingId,
     prev: FaceRingId,
@@ -128,7 +141,7 @@ pub struct FaceRing {
 impl FaceRing {
     fn new(face: FaceId) -> Self {
         Self {
-            face_edge: FaceEdgeId::invalid(),
+            element: Element::FaceEdge(FaceEdgeId::invalid()),
             face,
             next: FaceRingId::invalid(),
             prev: FaceRingId::invalid(),
@@ -167,6 +180,7 @@ pub struct Plc<V, E, F> {
     face_edges: IdMap<FaceEdgeId, FaceEdge>,
     rings: IdMap<FaceRingId, FaceRing>,
     faces: IdMap<FaceId, Face<F>>,
+    edge_map: FnvHashMap<[VertexId; 2], EdgeId>,
     default_vertex: fn() -> V,
     default_edge: fn() -> E,
     default_face: fn() -> F,
@@ -181,6 +195,7 @@ impl<V, E, F> Plc<V, E, F> {
             face_edges: IdMap::default(),
             rings: IdMap::default(),
             faces: IdMap::default(),
+            edge_map: FnvHashMap::default(),
             default_vertex,
             default_edge,
             default_face,
@@ -231,6 +246,149 @@ impl<V, E, F> Plc<V, E, F> {
     pub fn faces(&self) -> Faces<F> {
         self.faces.iter()
     }
+
+    /// Adds a vertex to the PLC and returns its vertex id.
+    pub fn add_vertex(&mut self, position: Pt3, value: V) -> VertexId {
+        self.vertices.insert(Vertex::new(position, value))
+    }
+
+    /// Adds an edge to the PLC and returns its edge id, assuming the edge doesn't already exist.
+    /// Does not add it to the hash map; that should be done manually.
+    fn add_new_edge(vertex_list: &mut IdMap<VertexId, Vertex<V>>, edge_list: &mut IdMap<EdgeId, Edge<E>>,
+        vertices: [VertexId; 2], value: E) -> EdgeId
+    {
+        let id = edge_list.insert(Edge::new(vertices, value));
+
+        // Fix source links
+        let out_id = vertex_list[vertices[0]].edge_out;
+        if out_id == EdgeId::invalid() {
+            vertex_list[vertices[0]].edge_out = id;
+            edge_list[id].next_edge_out = id;
+            edge_list[id].prev_edge_out = id;
+        } else {
+            let prev = edge_list[out_id].prev_edge_out;
+            edge_list[prev].next_edge_out = id;
+            edge_list[out_id].prev_edge_out = id;
+            edge_list[id].next_edge_out = out_id;
+            edge_list[id].prev_edge_out = out_id;
+        }
+
+        // Fix target links
+        let in_id = vertex_list[vertices[1]].edge_in;
+        if in_id == EdgeId::invalid() {
+            vertex_list[vertices[1]].edge_in = id;
+            edge_list[id].next_edge_in = id;
+            edge_list[id].prev_edge_in = id;
+        } else {
+            let prev = edge_list[in_id].prev_edge_in;
+            edge_list[prev].next_edge_in = id;
+            edge_list[in_id].prev_edge_in = id;
+            edge_list[id].next_edge_in = in_id;
+            edge_list[id].prev_edge_in = in_id;
+        }
+
+        id
+    }
+
+    /// Adds an edge to the PLC and returns its edge id.
+    /// Simply sets the value if the edge already exists.
+    pub fn add_edge(&mut self, vertices: [VertexId; 2], value: E) -> EdgeId {
+        match self.edge_map.entry(vertices) {
+            Entry::Vacant(entry) => {
+                let id = Self::add_new_edge(&mut self.vertices, &mut self.edges, vertices, value);
+                entry.insert(id);
+                id
+            }
+
+            Entry::Occupied(entry) => {
+                let id = *entry.get();
+                self.edges[id].value = value;
+                id
+            }
+        }
+    }
+
+    /// Adds an edge to the PLC and returns its edge id.
+    /// Has no side effects if the edge already exists.
+    pub fn add_edge_if_absent(&mut self, vertices: [VertexId; 2], value: E) -> EdgeId {
+        match self.edge_map.entry(vertices) {
+            Entry::Vacant(entry) => {
+                let id = Self::add_new_edge(&mut self.vertices, &mut self.edges, vertices, value);
+                entry.insert(id);
+                id
+            }
+
+            Entry::Occupied(entry) => {
+                *entry.get()
+            }
+        }
+    }
+    
+    /// Adds a face to the PLC and returns its id.
+    ///
+    /// Warning: This can cause 2 faces with the same vertices in the same order to exist.
+    pub fn add_face<RI: IntoIterator<Item = VI>, VI: IntoIterator<Item = VertexId>>(&mut self, vertices: RI, value: F) -> FaceId {
+        let id = self.faces.insert(Face::new(value));
+        
+        // Rings
+        let mut first_ring = FaceRingId::invalid();
+        let mut prev_ring = FaceRingId::invalid();
+
+        for ring_iter in vertices.into_iter() {
+            let ring = self.rings.insert(FaceRing::new(id));
+            if first_ring == FaceRingId::invalid() {
+                first_ring = ring;
+                self.faces[id].ring = first_ring;
+            } else {
+                self.rings[prev_ring].next = ring;
+                self.rings[ring].prev = prev_ring;
+            }
+
+            // Face edges
+            let mut ring_iter = ring_iter.into_iter();
+            let mut first_vertex = ring_iter.next().expect("Face ring must have at least 1 vertex.");
+            let mut prev_vertex = first_vertex;
+
+            if let Some(second_vertex) = ring_iter.next() {
+                let mut first_fe = FaceEdgeId::invalid();
+                let mut prev_fe = FaceEdgeId::invalid();
+
+                // Multiple vertices
+                for vertex in iter::once(second_vertex).chain(ring_iter).chain(iter::once(first_vertex)) {
+                    let edge = self.add_edge_if_absent([prev_vertex, vertex], (self.default_edge)());
+                    let fe = self.face_edges.insert(FaceEdge::new(edge, ring));
+
+                    if first_fe == FaceEdgeId::invalid() {
+                        first_fe = fe;
+                        self.rings[ring].element = Element::FaceEdge(first_fe);
+                    } else {
+                        self.face_edges[prev_fe].next = fe;
+                        self.face_edges[fe].prev = prev_fe;
+                    }
+
+                    // TODO: Edge links
+
+                    prev_vertex = vertex;
+                    prev_fe = fe;
+                }
+
+                // Complete cycle
+                self.face_edges[prev_fe].next = first_fe;
+                self.face_edges[first_fe].prev = prev_fe;
+            } else {
+                // Isolated vertex
+                self.rings[ring].element = Element::Vertex(first_vertex);
+            }
+
+            prev_ring = ring;
+        }
+
+        // Complete cycle
+        self.rings[prev_ring].next = first_ring;
+        self.rings[first_ring].prev = prev_ring;
+
+        id
+    }
 }
 
 /// Iterates over vertex ids and vertices.
@@ -241,3 +399,12 @@ pub type Edges<'a, E> = id_map::Iter<'a, EdgeId, Edge<E>>;
 
 /// Iterates over face ids and faces.
 pub type Faces<'a, F> = id_map::Iter<'a, FaceId, Face<F>>;
+
+///// Iterates over vertex ids generated from extending the vertex list.
+//pub type ExtendVertices<'a, V, I> = id_map::ExtendValues<'a, VertexId, Vertex<V>, I>;
+//
+///// Iterates over edge ids generated from extending the edge list.
+//pub type ExtendEdges<'a, E, I> = id_map::ExtendValues<'a, EdgeId, Edge<E>, I>;
+//
+///// Iterates over face ids generated from extending the face list.
+//pub type ExtendFaces<'a, F, I> = id_map::ExtendValues<'a, FaceId, Face<F>, I>;

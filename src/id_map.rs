@@ -232,7 +232,7 @@ impl<K: Id, V> IndexMut<K> for IdMap<K, V> {
     }
 }
 
-pub(crate) struct ExtendValues<'a, K, V, I> {
+pub struct ExtendValues<'a, K, V, I> {
     map: &'a mut IdMap<K, V>,
     values: I,
 }
