@@ -62,6 +62,7 @@ macro_rules! alias {
         }
 
         $(#[$attr])*
+        #[inline(always)]
         /// This is an alias.
         $pub fn $alias$(<$($gen),*>)?($($arg: $arg_type),*) -> $ret {
             Self::$name $(::<$($gen),*>)?($($arg),*)

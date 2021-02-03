@@ -4,7 +4,7 @@ use rand_distr::UnitSphere;
 use tet::Tets;
 
 use nalgebra::Point3;
-use rand::distributions::{Distribution, Uniform};
+use rand::distributions::Distribution;
 use rand_pcg::Pcg64;
 
 type Pt3 = Point3<f64>;

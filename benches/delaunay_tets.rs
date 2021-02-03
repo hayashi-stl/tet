@@ -1,9 +1,8 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BatchSize};
+use criterion::{criterion_group, criterion_main, Criterion};
 use tet::Tets;
 
 use nalgebra::Point3;
 use rand::distributions::{Distribution, Uniform};
-use rand::seq::SliceRandom;
 use rand_distr::UnitSphere;
 use rand_pcg::Pcg64;
 

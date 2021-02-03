@@ -1,5 +1,5 @@
 use crate::{Pt3, VertexId, id_map::IdType};
-use hilbert::{point_list, Point, fast_hilbert};
+use hilbert::fast_hilbert;
 use float_ord::FloatOrd;
 
 /// Sorts some points along the Hilbert curve.

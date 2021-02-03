@@ -1,5 +1,4 @@
 use std::{cell::Cell, collections::VecDeque, hash::{Hash, Hasher}, path::Path};
-use std::collections::hash_set;
 use std::ops::Index;
 use std::iter::{self, Map};
 use float_ord::FloatOrd;
@@ -8,14 +7,21 @@ use bitflags::bitflags;
 use crate::{Pt1, id_map::{IdMap, IdType}};
 use crate::{Pt3, TetId, VertexId, Vec3};
 use crate::util;
-use prv::{TetEq, SecondEq};
 use fnv::{FnvHashMap, FnvHashSet};
 use simplicity as sim;
+
+bitflags! {
+    struct VertexFlags: u32 {
+        /// Whether this tet has been visited by vertex_targets_opt
+        const VERTEX_TARGETS = 1 << 0;
+    }
+}
 
 /// A vertex stores a tet that it's part of and its position.
 #[derive(Clone, Debug)]
 pub struct Vertex<V> {
     tet: TetWalker,
+    flags: Cell<VertexFlags>,
     position: Pt3,
     value: V,
 }
@@ -24,6 +30,7 @@ impl<V> Vertex<V> {
     fn new(tet: TetWalker, position: Pt3, value: V) -> Self {
         Self {
             tet,
+            flags: Cell::new(VertexFlags::empty()),
             position,
             value,
         }
@@ -47,9 +54,12 @@ bitflags! {
         const BOUND_IMM_1 = 1 << 1;
         const BOUND_IMM_2 = 1 << 2;
         const BOUND_IMM_3 = 1 << 3;
-
         /// Whether this tet is part of the boundary. Used in flip_in_vertex_unchecked.
         const BOUNDARY = 1 << 4;
+        /// Whether this tet has been visited by walkers_from_vertex_opt
+        const WALKERS_FROM_VERTEX = 1 << 5;
+        /// Whether this tet needs to be duplicated in flip_in_vertex_unchecked
+        const NEEDS_DUPLICATION = 1 << 6;
     }
 }
 
@@ -714,6 +724,7 @@ impl TetWalker {
 #[derive(Debug)]
 pub struct Tets<V, T> {
     vertices: IdMap<VertexId, Vertex<V>>,
+    ghost_flags: Cell<VertexFlags>,
     tets: IdMap<TetId, Tet<T>>,
     default_tet: fn() -> T,
 }
@@ -748,6 +759,7 @@ impl<V, T> Tets<V, T> {
     {
         let mut tets = Self {
             vertices: IdMap::default(),
+            ghost_flags: Cell::new(VertexFlags::empty()),
             tets: IdMap::default(),
             default_tet,
         };
@@ -797,6 +809,16 @@ impl<V, T> Tets<V, T> {
         tets
     }
 
+    /// Gets a reference to the flags of the vertex.
+    /// If the ghost vertex is passed, this gets the ghost flags.
+    fn vertex_flags(&self, vertex: VertexId) -> &Cell<VertexFlags> {
+        if vertex == Self::GHOST {
+            &self.ghost_flags
+        } else {
+            &self[vertex].flags
+        }
+    }
+
     /// Gets the number of vertices in the tet mesh.
     pub fn num_vertices(&self) -> usize {
         self.vertices.len()
@@ -829,22 +851,6 @@ impl<V, T> Tets<V, T> {
         TetWalker::new(tet, 3)
     }
 
-    fn dfs_vertex<'a, E: Copy + Eq + Hash + From<(&'a Self, TetWalker)>>(&'a self, vertex: VertexId) -> FnvHashSet<E> {
-        let mut walkers = FnvHashSet::default();
-        let mut to_search = vec![self.walker_from_vertex(vertex)];
-
-        // DFS
-        while let Some(walker) = to_search.pop() {
-            if walkers.insert(E::from((self, walker))) {
-                to_search.push(walker.to_perm(Permutation::_1032).to_adj(&self));
-                to_search.push(walker.to_perm(Permutation::_2013).to_adj(&self));
-                to_search.push(walker.to_perm(Permutation::_3021).to_adj(&self));
-            }
-        }
-
-        walkers
-    }
-
     /// Gets the tet walkers that start from a vertex.
     /// Each tet walker is for a unique tet and has the vertex as its first vertex.
     pub fn walkers_from_vertex<'a>(&'a self, vertex: VertexId) -> WalkersFromVertex<'a, V, T> {
@@ -855,9 +861,30 @@ impl<V, T> Tets<V, T> {
         }
     }
 
+    /// Gets the tet walkers that start from a vertex.
+    /// Each tet walker is for a unique tet and has the vertex as its first vertex.
+    ///
+    /// # Safety
+    /// The returned iterator needs to drop before calling this function again.
+    unsafe fn walkers_from_vertex_opt<'a>(&'a self, vertex: VertexId) -> WalkersFromVertexOpt<'a, V, T> {
+        WalkersFromVertexOpt {
+            mesh: self,
+            visited: vec![],
+            to_search: vec![self.walker_from_vertex(vertex)],
+        }
+    }
+
     /// Gets the tets that contain a vertex.
     pub fn vertex_tets<'a>(&'a self, vertex: VertexId) -> VertexTets<'a, V, T> {
         self.walkers_from_vertex(vertex).map(|walker| walker.id())
+    }
+
+    /// Gets the tets that contain a vertex.
+    ///
+    /// # Safety
+    /// The returned iterator needs to drop before calling this function again.
+    unsafe fn vertex_tets_opt<'a>(&'a self, vertex: VertexId) -> VertexTetsOpt<'a, V, T> {
+        self.walkers_from_vertex_opt(vertex).map(|walker| walker.id())
     }
 
     /// Gets the edge target vertices from a vertex.
@@ -865,6 +892,18 @@ impl<V, T> Tets<V, T> {
         VertexTargets {
             mesh: self,
             visited: FnvHashSet::default(),
+            to_search: vec![self.walker_from_vertex(vertex)],
+        }
+    }
+
+    /// Gets the edge target vertices from a vertex.
+    ///
+    /// # Safety
+    /// The returned iterator needs to drop before calling this function again.
+    unsafe fn vertex_targets_opt<'a>(&'a self, vertex: VertexId) -> VertexTargetsOpt<'a, V, T> {
+        VertexTargetsOpt {
+            mesh: self,
+            visited: vec![],
             to_search: vec![self.walker_from_vertex(vertex)],
         }
     }
@@ -949,23 +988,24 @@ impl<V, T> Tets<V, T> {
         // This is why the boundary must be manifold.
         let mut edge_map = FnvHashMap::<[VertexId; 2], TetWalker>::default();
         edge_map.reserve(3 * boundary.len());
-        let mut ids = FnvHashSet::<TetId>::default();
 
         // Check for tets that need to be duplicated and make necessary clones
         for walker in boundary.iter_mut() {
-            // Also unmark boundary
-            self.tets[walker.id()].clear_flags(TetFlags::BOUNDARY);
-
-            if ids.contains(&walker.id()) {
+            if self.tets[walker.id()].flags.get().intersects(TetFlags::NEEDS_DUPLICATION) {
                 let id = self.tets.insert(self[walker.id()].clone());
+                // Do not clear the flag in the clone because it will be cleared later.
                 let adj = walker.to_adj_ae(&self);
                 self.tets[adj.id()].opp_tets[adj.edge as usize % 4].tet = id;
                 walker.tet = id;
+            } else {
+                self.tets[walker.id()].set_flags(TetFlags::NEEDS_DUPLICATION);
             }
-            ids.insert(walker.id());
         }
 
         for walker in &*boundary {
+            // Also unmark boundary and tet duplication flags
+            self.tets[walker.id()].clear_flags(TetFlags::BOUNDARY | TetFlags::NEEDS_DUPLICATION);
+
             // Don't forget the new vertex!
             self.tets[walker.id()].vertices[walker.edge as usize % 4] = vertex;
             if self[vertex].tet.id() == TetId::invalid() {
@@ -1042,22 +1082,30 @@ impl<V, T> Tets<V, T> {
 
         // Go to vertex closest to position
         while let Some(closer) = {
-            let min = self.vertex_targets(closest)
-                .filter(|v| *v != id)
-                .min_by_key(|v| FloatOrd(self.vertex_distance2(*v, id)));
-
+            // Safe because this function's iterator is dropped on every iteration.
+            let min = unsafe {
+                self.vertex_targets_opt(closest)
+                    .filter(|v| *v != id)
+                    .min_by_key(|v| FloatOrd(self.vertex_distance2(*v, id)))
+            };
             min.filter(|v| self.vertex_distance2(*v, id) < self.vertex_distance2(closest, id))
         } {
             closest = closer;
         }
 
         // Find a tet that is no longer Delaunay
-        let not_delaunay = self.vertex_tets(closest).find(|tet| { 
-            let vs = self[*tet].vertices();
-            self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
-        }).unwrap_or_else(|| {
+        // Safe because there was no call to vertex_tets_opt before
+        let not_delaunay = unsafe {
+            self.vertex_tets_opt(closest).find(|tet| { 
+                let vs = self[*tet].vertices();
+                self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
+            })
+        }.unwrap_or_else(|| {
             // Rare case because the distance comparisons are not robust
-            let mut checked = self.vertex_tets(closest).collect::<FnvHashSet<_>>(); // already checked
+            // Safe because the previous call's iterator was dropped.
+            let mut checked = unsafe {
+                self.vertex_tets_opt(closest).collect::<FnvHashSet<_>>()
+            }; // already checked
             let mut tets = checked.iter().flat_map(|tet| self.adjacent_tets(*tet).to_vec())
                 .collect::<FnvHashSet<_>>().into_iter().collect::<VecDeque<_>>();
 
@@ -1105,7 +1153,7 @@ impl<V, T> Tets<V, T> {
                     name: "Tet Group".to_owned(),
                     index: 0,
                     material: None,
-                    polys: solid_tets().flat_map(|(i, t)| vec![
+                    polys: solid_tets().flat_map(|(i, _)| vec![
                         [4 * i + 0, 4 * i + 1, 4 * i + 2],
                         [4 * i + 3, 4 * i + 2, 4 * i + 1],
                         [4 * i + 2, 4 * i + 3, 4 * i + 0],
@@ -1168,6 +1216,50 @@ impl<'a, V, T> Iterator for WalkersFromVertex<'a, V, T> {
     }
 }
 
+/// Iterates over tet walkers from a vertex.
+/// Each tet walker is for a unique tetrahedron and has the vertex as its first vertex.
+/// Uses flags and a vec instead of a hash map. Do not call walkers_from_vertex_opt again until this this dropped.
+#[derive(Clone, Debug)]
+struct WalkersFromVertexOpt<'a, V, T> {
+    mesh: &'a Tets<V, T>,
+    visited: Vec<TetId>,
+    to_search: Vec<TetWalker>,
+}
+
+impl<'a, V, T> Iterator for WalkersFromVertexOpt<'a, V, T> {
+    type Item = TetWalker;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // DFS
+        while let Some(walker) = self.to_search.pop() {
+            let tet = &self.mesh.tets[walker.id()];
+            if !tet.flags.get().intersects(TetFlags::WALKERS_FROM_VERTEX) {
+                tet.set_flags(TetFlags::WALKERS_FROM_VERTEX);
+                self.visited.push(walker.id());
+                self.to_search.push(walker.to_perm(Permutation::_1032).to_adj(self.mesh));
+                self.to_search.push(walker.to_perm(Permutation::_2013).to_adj(self.mesh));
+                self.to_search.push(walker.to_perm(Permutation::_3021).to_adj(self.mesh));
+                return Some(walker)
+            }
+        }
+        None
+    }
+}
+
+impl<'a, V, T> Drop for WalkersFromVertexOpt<'a, V, T> {
+    fn drop(&mut self) {
+        for tet in &self.visited {
+            self.mesh.tets[*tet].clear_flags(TetFlags::WALKERS_FROM_VERTEX);
+        }
+    }
+}
+
+/// Iterates over tets containing a vertex.
+pub type VertexTets<'a, V, T> = Map<WalkersFromVertex<'a, V, T>, fn(TetWalker) -> TetId>;
+
+/// Iterates over tets containing a vertex.
+type VertexTetsOpt<'a, V, T> = Map<WalkersFromVertexOpt<'a, V, T>, fn(TetWalker) -> TetId>;
+
 #[derive(Clone, Debug)]
 pub struct VertexTargets<'a, V, T> {
     mesh: &'a Tets<V, T>,
@@ -1199,63 +1291,46 @@ impl<'a, V, T> Iterator for VertexTargets<'a, V, T> {
     }
 }
 
-/// Iterates over tets containing a vertex.
-pub type VertexTets<'a, V, T> = Map<WalkersFromVertex<'a, V, T>, fn(TetWalker) -> TetId>;
+#[derive(Clone, Debug)]
+pub struct VertexTargetsOpt<'a, V, T> {
+    mesh: &'a Tets<V, T>,
+    visited: Vec<VertexId>,
+    to_search: Vec<TetWalker>,
+}
 
-mod prv {
-    use super::*;
+impl<'a, V, T> Iterator for VertexTargetsOpt<'a, V, T> {
+    type Item = VertexId;
 
-    #[derive(Clone, Copy, Debug)]
-    pub struct TetEq(pub(crate) TetWalker);
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(walker) = self.to_search.pop() {
+            let target = walker.second(self.mesh);
 
-    impl PartialEq for TetEq {
-        fn eq(&self, other: &Self) -> bool {
-            self.0.id() == other.0.id()
+            let flags = self.mesh.vertex_flags(target);
+            if !flags.get().intersects(VertexFlags::VERTEX_TARGETS) {
+                flags.set(flags.get() | VertexFlags::VERTEX_TARGETS);
+                self.visited.push(target);
+
+                // Search is different; search 1 edge radius at a time.
+                let mut walker = walker.to_adj(self.mesh).to_nfe();
+                let start = walker;
+                while {
+                    self.to_search.push(walker);
+                    walker = walker.to_perm(Permutation::_3021).to_adj(self.mesh);
+                    walker != start
+                } {}
+
+                return Some(target);
+            }
         }
+        None
     }
+}
 
-    impl Eq for TetEq {}
-
-    impl Hash for TetEq {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.0.id().hash(state);
-        }
-    }
-
-    impl<'a, V, T> From<(&'a Tets<V, T>, TetWalker)> for TetEq {
-        fn from(tup: (&'a Tets<V, T>, TetWalker)) -> Self {
-            Self(tup.1)
-        }
-    }
-
-    #[derive(Debug)]
-    pub struct SecondEq<'a, V, T>(pub(crate) &'a Tets<V, T>, pub(crate) TetWalker);
-
-    impl<'a, V, T> Clone for SecondEq<'a, V, T> {
-        fn clone(&self) -> Self {
-            Self(self.0, self.1)
-        }
-    }
-
-    impl<'a, V, T> Copy for SecondEq<'a, V, T> {}
-
-    impl<'a, V, T> PartialEq for SecondEq<'a, V, T> {
-        fn eq(&self, other: &Self) -> bool {
-            self.1.second(self.0) == other.1.second(other.0)
-        }
-    }
-
-    impl<'a, V, T> Eq for SecondEq<'a, V, T> {}
-
-    impl<'a, V, T> Hash for SecondEq<'a, V, T> {
-        fn hash<H: Hasher>(&self, state: &mut H) {
-            self.1.second(self.0).hash(state);
-        }
-    }
-
-    impl<'a, V, T> From<(&'a Tets<V, T>, TetWalker)> for SecondEq<'a, V, T> {
-        fn from(tup: (&'a Tets<V, T>, TetWalker)) -> Self {
-            Self(tup.0, tup.1)
+impl<'a, V, T> Drop for VertexTargetsOpt<'a, V, T> {
+    fn drop(&mut self) {
+        for target in &self.visited {
+            let flags = self.mesh.vertex_flags(*target);
+            flags.set(flags.get() & !VertexFlags::VERTEX_TARGETS);
         }
     }
 }
@@ -1497,7 +1572,7 @@ mod tests {
             (),
         ));
         let walkers = mesh.walker_from_tet(t(1)).flip14_unchecked(&mut mesh, v(4));
-        for (i, walker) in walkers.iter().enumerate() {
+        for (_, walker) in walkers.iter().enumerate() {
             assert_eq!(walker.fourth(&mesh), v(4));
         }
 
@@ -1766,7 +1841,7 @@ mod tests {
     #[test]
     fn test_flip_in_vertex_unchecked_2_6() {
         let mut mesh = default_tets();
-        for i in 0..2 {
+        for _ in 0..2 {
             mesh.vertices.insert(Vertex::new(
                 TetWalker::new(TetId::invalid(), 0),
                 Pt3::origin(),
