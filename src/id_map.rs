@@ -245,7 +245,7 @@ impl<'a, K: Id, V, I: Iterator<Item = V>> Iterator for ExtendValues<'a, K, V, I>
     }
 }
 
-pub(crate) struct Keys<'a, K, V> {
+pub struct Keys<'a, K, V> {
     iter: Enumerate<slice::Iter<'a, Option<V>>>,
     marker: PhantomData<K>,
 }

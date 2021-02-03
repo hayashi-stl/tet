@@ -41,6 +41,22 @@ macro_rules! id {
             pub(crate) const fn invalid() -> Self {
                 Self(crate::id_map::IdType::MAX)
             }
+
+            /// Returns this id if it's valid or None otherwise.
+            #[allow(dead_code)]
+            pub(crate) fn valid(self) -> Option<Self> {
+                if self == Self::invalid() {
+                    None
+                } else {
+                    Some(self)
+                }
+            }
+
+            /// Returns whether this id is valid.
+            #[allow(dead_code)]
+            pub(crate) fn is_valid(self) -> bool {
+                self != Self::invalid()
+            }
         }
     };
 }

@@ -1,8 +1,10 @@
-use crate::{Pt3, VertexId};
+use crate::{Pt3, VertexId, util::{CircularListIter, MapWith}};
 use crate::id_map::{self, IdMap};
 
-use fnv::FnvHashMap;
-use std::{collections::hash_map::Entry, iter};
+use fnv::{FnvHashMap, FnvHashSet};
+use std::{collections::hash_map::Entry, fmt::Debug, iter, ops::Index};
+use std::hash::Hash;
+use std::fmt::Display;
 
 crate::id! {
     /// A PLC edge id
@@ -48,11 +50,13 @@ impl<V> Vertex<V> {
         }
     }
 
-    fn position(&self) -> Pt3 {
+    /// Gets the position of this vertex.
+    pub fn position(&self) -> Pt3 {
         self.position
     }
 
-    fn value(&self) -> &V {
+    /// Gets the value of this vertex.
+    pub fn value(&self) -> &V {
         &self.value
     }
 }
@@ -84,11 +88,13 @@ impl<E> Edge<E> {
         }
     }
 
-    fn vertices(&self) -> [VertexId; 2] {
+    /// Gets the vertices of this edge.
+    pub fn vertices(&self) -> [VertexId; 2] {
         self.vertices
     }
 
-    fn value(&self) -> &E {
+    /// Gets the value of this edge.
+    pub fn value(&self) -> &E {
         &self.value
     }
 }
@@ -122,7 +128,7 @@ impl FaceEdge {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Element {
+enum RingElement {
     FaceEdge(FaceEdgeId),
     Vertex(VertexId),
 }
@@ -132,7 +138,7 @@ enum Element {
 pub struct FaceRing {
     /// A face edge or vertex that belongs to this ring.
     /// This represents an isolated vertex on a face if it's a vertex.
-    element: Element,
+    element: RingElement,
     face: FaceId,
     next: FaceRingId,
     prev: FaceRingId,
@@ -141,10 +147,21 @@ pub struct FaceRing {
 impl FaceRing {
     fn new(face: FaceId) -> Self {
         Self {
-            element: Element::FaceEdge(FaceEdgeId::invalid()),
+            element: RingElement::FaceEdge(FaceEdgeId::invalid()),
             face,
             next: FaceRingId::invalid(),
             prev: FaceRingId::invalid(),
+        }
+    }
+
+    fn vertices<'a, V, E, F>(&self, plc: &'a Plc<V, E, F>) -> FaceRingVertices<'a, V, E, F> {
+        match self.element {
+            RingElement::FaceEdge(fe) =>
+                FaceRingVertices::Multiple(
+                    CircularListIter::new(plc, fe, |plc, fe| &plc.face_edges[fe], |plc, fe| plc.face_edges[fe].next)
+                ),
+
+            RingElement::Vertex(v) => FaceRingVertices::Single(Some((v, &plc.vertices[v])))
         }
     }
 }
@@ -165,8 +182,14 @@ impl<F> Face<F> {
         }
     }
 
-    fn value(&self) -> &F {
+    /// Gets the value of this face.
+    pub fn value(&self) -> &F {
         &self.value
+    }
+
+    /// Iterates over the rings of this face.
+    pub fn rings<'a, V, E>(&self, plc: &'a Plc<V, E, F>) -> FaceRings<'a, V, E, F> {
+        CircularListIter::new(plc, self.ring, |plc, id| &plc.rings[id], |plc, id| plc.rings[id].next)
     }
 }
 
@@ -247,6 +270,21 @@ impl<V, E, F> Plc<V, E, F> {
         self.faces.iter()
     }
 
+    /// Iterates over vertex ids
+    pub fn vertex_ids(&self) -> VertexIds<V> {
+        self.vertices.keys()
+    }
+
+    /// Iterates over edge ids
+    pub fn edge_ids(&self) -> EdgeIds<E> {
+        self.edges.keys()
+    }
+
+    /// Iterates over face ids
+    pub fn face_ids(&self) -> FaceIds<F> {
+        self.faces.keys()
+    }
+
     /// Adds a vertex to the PLC and returns its vertex id.
     pub fn add_vertex(&mut self, position: Pt3, value: V) -> VertexId {
         self.vertices.insert(Vertex::new(position, value))
@@ -270,7 +308,7 @@ impl<V, E, F> Plc<V, E, F> {
             edge_list[prev].next_edge_out = id;
             edge_list[out_id].prev_edge_out = id;
             edge_list[id].next_edge_out = out_id;
-            edge_list[id].prev_edge_out = out_id;
+            edge_list[id].prev_edge_out = prev;
         }
 
         // Fix target links
@@ -284,7 +322,7 @@ impl<V, E, F> Plc<V, E, F> {
             edge_list[prev].next_edge_in = id;
             edge_list[in_id].prev_edge_in = id;
             edge_list[id].next_edge_in = in_id;
-            edge_list[id].prev_edge_in = in_id;
+            edge_list[id].prev_edge_in = prev;
         }
 
         id
@@ -346,7 +384,7 @@ impl<V, E, F> Plc<V, E, F> {
 
             // Face edges
             let mut ring_iter = ring_iter.into_iter();
-            let mut first_vertex = ring_iter.next().expect("Face ring must have at least 1 vertex.");
+            let first_vertex = ring_iter.next().expect("Face ring must have at least 1 vertex.");
             let mut prev_vertex = first_vertex;
 
             if let Some(second_vertex) = ring_iter.next() {
@@ -360,13 +398,24 @@ impl<V, E, F> Plc<V, E, F> {
 
                     if first_fe == FaceEdgeId::invalid() {
                         first_fe = fe;
-                        self.rings[ring].element = Element::FaceEdge(first_fe);
+                        self.rings[ring].element = RingElement::FaceEdge(first_fe);
                     } else {
                         self.face_edges[prev_fe].next = fe;
                         self.face_edges[fe].prev = prev_fe;
                     }
 
-                    // TODO: Edge links
+                    let next_on_edge = self.edges[edge].face_edge;
+                    if next_on_edge == FaceEdgeId::invalid() {
+                        self.edges[edge].face_edge = fe;
+                        self.face_edges[fe].next_on_edge = fe;
+                        self.face_edges[fe].prev_on_edge = fe;
+                    } else {
+                        let prev_on_edge = self.face_edges[next_on_edge].prev_on_edge;
+                        self.face_edges[next_on_edge].prev_on_edge = fe;
+                        self.face_edges[prev_on_edge].next_on_edge = fe;
+                        self.face_edges[fe].next_on_edge = next_on_edge;
+                        self.face_edges[fe].prev_on_edge = prev_on_edge;
+                    }
 
                     prev_vertex = vertex;
                     prev_fe = fe;
@@ -377,7 +426,8 @@ impl<V, E, F> Plc<V, E, F> {
                 self.face_edges[first_fe].prev = prev_fe;
             } else {
                 // Isolated vertex
-                self.rings[ring].element = Element::Vertex(first_vertex);
+                self.rings[ring].element = RingElement::Vertex(first_vertex);
+                self.vertices[first_vertex].ring = ring;
             }
 
             prev_ring = ring;
@@ -388,6 +438,124 @@ impl<V, E, F> Plc<V, E, F> {
         self.rings[first_ring].prev = prev_ring;
 
         id
+    }
+
+    pub fn validate(&self, distance_tolerance: f64) -> Result<(), ValidateError<V, E, F>> {
+        Ok(())
+    }
+
+    #[cfg(feature = "obj")]
+    pub fn from_obj(data: obj::ObjData, default_vertex: fn() -> V, default_edge: fn() -> E, default_face: fn() -> F) -> Self {
+        let mut plc = Self::new(default_vertex, default_edge, default_face);
+
+        for [x, y, z] in data.position {
+            plc.add_vertex(Pt3::new(x as f64, y as f64, z as f64), default_vertex());
+        }
+        
+        for object in data.objects {
+            for group in object.groups {
+                for obj::SimplePolygon(poly) in group.polys {
+                    if poly.len() == 2 {
+                        // Edge
+                        plc.add_edge([VertexId(poly[0].0 as u32), VertexId(poly[1].0 as u32)], default_edge());
+                    } else {
+                        plc.add_face(
+                            iter::once(poly.into_iter().map(|vertex| VertexId(vertex.0 as u32))),
+                            default_face(),
+                        );
+                    }
+                }
+            }
+        }
+
+        plc
+    }
+
+    #[cfg(feature = "obj")]
+    pub fn load_obj<P: AsRef<std::path::Path>>(path: P, default_vertex: fn() -> V, default_edge: fn() -> E, default_face: fn() -> F)
+    -> Result<Self, obj::ObjError> {
+        obj::Obj::load(path).map(|obj| Self::from_obj(obj.data, default_vertex, default_edge, default_face))
+    }
+}
+
+/// An error returned from the validate function.
+pub struct ValidateError<'a, V, E, F> {
+    /// Needed to display error
+    plc: &'a Plc<V, E, F>,
+    error: ValidateReason,
+}
+
+/// The error that actually happened.
+pub enum ValidateReason {
+    /// Some faces have less than 3 vertices.
+    DegenerateFace(Vec<FaceId>),
+    /// Some faces are not coplanar enough.
+    TwistedFace(Vec<FaceId>),
+    /// Some elements are too close to each other.
+    TooClose(Vec<(Element, Element, f64)>),
+}
+
+/// A vertex, edge, or face.
+pub enum Element {
+    Vertex(VertexId),
+    Edge(EdgeId),
+    Face(FaceId),
+}
+
+/// Iterator over the rings of a face
+pub type FaceRings<'a, V, E, F> = CircularListIter<&'a Plc<V, E, F>, FaceRingId, fn(&'a Plc<V, E, F>, FaceRingId) -> &'a FaceRing,
+    fn(&'a Plc<V, E, F>, FaceRingId) -> FaceRingId>;
+
+/// Iterator over the vertices of a face ring
+pub enum FaceRingVertices<'a, V, E, F> {
+    Single(Option<(VertexId, &'a Vertex<V>)>),
+    Multiple(
+        CircularListIter<&'a Plc<V, E, F>, FaceEdgeId, fn(&'a Plc<V, E, F>, FaceEdgeId) -> &'a FaceEdge, fn(&'a Plc<V, E, F>, FaceEdgeId) -> FaceEdgeId>,
+    )
+}
+
+impl<'a, V, E, F> Iterator for FaceRingVertices<'a, V, E, F> {
+    type Item = (VertexId, &'a Vertex<V>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single(vertex) => vertex.take(),
+
+            Self::Multiple(iter) => {
+                let plc = iter.common;
+                iter.next().map(|(_, fe)| {
+                    let vertex = plc.edges[fe.edge].vertices()[0];
+                    (vertex, &plc.vertices[vertex])
+                })
+            }
+        }
+    }
+}
+
+impl<V, E, F> Index<VertexId> for Plc<V, E, F> {
+    type Output = Vertex<V>;
+
+    fn index(&self, index: VertexId) -> &Self::Output {
+        self.vertex(index)
+            .unwrap_or_else(|| panic!("Vertex {} does not exist", index))
+    }
+}
+
+impl<V, E, F> Index<EdgeId> for Plc<V, E, F> {
+    type Output = Edge<E>;
+
+    fn index(&self, index: EdgeId) -> &Self::Output {
+        self.edge(index)
+            .unwrap_or_else(|| panic!("Edge {} does not exist", index))
+    }
+}
+
+impl<V, E, F> Index<FaceId> for Plc<V, E, F> {
+    type Output = Face<F>;
+
+    fn index(&self, index: FaceId) -> &Self::Output {
+        self.face(index)
+            .unwrap_or_else(|| panic!("Face {} does not exist", index))
     }
 }
 
@@ -400,6 +568,15 @@ pub type Edges<'a, E> = id_map::Iter<'a, EdgeId, Edge<E>>;
 /// Iterates over face ids and faces.
 pub type Faces<'a, F> = id_map::Iter<'a, FaceId, Face<F>>;
 
+/// Iterates over vertex ids
+pub type VertexIds<'a, V> = id_map::Keys<'a, VertexId, Vertex<V>>;
+
+/// Keysates over edge ids
+pub type EdgeIds<'a, E> = id_map::Keys<'a, EdgeId, Edge<E>>;
+
+/// Keysates over face ids
+pub type FaceIds<'a, F> = id_map::Keys<'a, FaceId, Face<F>>;
+
 ///// Iterates over vertex ids generated from extending the vertex list.
 //pub type ExtendVertices<'a, V, I> = id_map::ExtendValues<'a, VertexId, Vertex<V>, I>;
 //
@@ -408,3 +585,385 @@ pub type Faces<'a, F> = id_map::Iter<'a, FaceId, Face<F>>;
 //
 ///// Iterates over face ids generated from extending the face list.
 //pub type ExtendFaces<'a, F, I> = id_map::ExtendValues<'a, FaceId, Face<F>, I>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pathfinding::directed::bfs;
+
+    /// Assert all the invariants of this PLC structure. This does not include
+    /// not having intersections.
+    #[cfg(test)]
+    #[track_caller]
+    fn assert_integrity<V, E, F>(plc: &Plc<V, E, F>) {
+        // Vertex invariants
+        for (id, vertex) in plc.vertices.iter() {
+            if let Some(edge_out) = vertex.edge_out.valid() {
+                assert_eq!(plc.edges[edge_out].vertices[0], id, "Out-edge {} of vertex {} does not point to the vertex.", edge_out, id);
+            }
+
+            if let Some(edge_in) = vertex.edge_in.valid() {
+                assert_eq!(plc.edges[edge_in].vertices[1], id, "In-edge {} of vertex {} does not point to the vertex.", edge_in, id);
+            }
+
+            if let Some(ring) = vertex.ring.valid() {
+                assert_eq!(plc.rings[ring].element, RingElement::Vertex(id),
+                    "Face ring {} of vertex {} does not point to the vertex.", ring, id);
+            }
+        }
+
+        // Edge invariants
+        let mut edge_map = plc.edge_map.clone();
+        for (id, edge) in plc.edges.iter() {
+            assert!(edge.vertices[0].is_valid(), "Edge {} has an invalid source vertex", id);
+            assert!(edge.vertices[1].is_valid(), "Edge {} has an invalid target vertex", id);
+            assert_ne!(edge.vertices[0], edge.vertices[1], "Edge {} has vertices that are the same.", id);
+
+            if let Some(edge_id) = edge_map.remove(&[edge.vertices[0], edge.vertices[1]]) {
+                assert_eq!(edge_id, id, "Edge {} does not match id of edge {}-{} in edge map.", id, edge.vertices[0], edge.vertices[1]);
+            } else {
+                panic!("Edge {} ({}-{}) is missing in edge map.", id, edge.vertices[0], edge.vertices[1]);
+            }
+
+            if let Some(face_edge) = edge.face_edge.valid() {
+                assert_eq!(plc.face_edges[face_edge].edge, id, "Face edge {} of edge {} does not point to the edge.", face_edge, id);
+            }
+
+            assert!(edge.next_edge_out.is_valid(), "Edge {} has an invalid next out-edge", id);
+            assert!(edge.prev_edge_out.is_valid(), "Edge {} has an invalid prev out-edge", id);
+            assert!(edge.next_edge_in.is_valid(), "Edge {} has an invalid next in-edge", id);
+            assert!(edge.prev_edge_in.is_valid(), "Edge {} has an invalid prev in-edge", id);
+
+            assert_eq!(plc.edges[edge.next_edge_out].vertices[0], edge.vertices[0],
+                "Next out-edge {} of edge {} does not point to the same source vertex.", edge.next_edge_out, id);
+            assert_eq!(plc.edges[edge.prev_edge_out].vertices[0], edge.vertices[0],
+                "Prev out-edge {} of edge {} does not point to the same source vertex.", edge.prev_edge_out, id);
+            assert_eq!(plc.edges[edge.next_edge_in].vertices[1], edge.vertices[1],
+                "Next in-edge {} of edge {} does not point to the same target vertex.", edge.next_edge_in, id);
+            assert_eq!(plc.edges[edge.prev_edge_in].vertices[1], edge.vertices[1],
+                "Prev in-edge {} of edge {} does not point to the same target vertex.", edge.prev_edge_in, id);
+        }
+        assert_circular_lists(&plc.edges, |e| e.prev_edge_out, |e| e.next_edge_out, "out-edge");
+        assert_circular_lists(&plc.edges, |e| e.prev_edge_in, |e| e.next_edge_in, "in-edge");
+
+        if let Some(([v0, v1], edge)) = edge_map.iter().next() {
+            panic!("Edge {} ({}-{}) is in edge map but is missing in edge list", edge, v0, v1);
+        }
+
+        // Face edge invariants
+        for (id, face_edge) in plc.face_edges.iter() {
+            assert!(face_edge.edge.is_valid(), "Face edge {} has an invalid edge", id);
+            assert!(face_edge.ring.is_valid(), "Face edge {} has an invalid face ring", id);
+
+            assert!(face_edge.next.is_valid(), "Face edge {} has an invalid next face edge", id);
+            assert!(face_edge.prev.is_valid(), "Face edge {} has an invalid prev face edge", id);
+            assert!(face_edge.next_on_edge.is_valid(), "Face edge {} has an invalid next face edge on the edge", id);
+            assert!(face_edge.prev_on_edge.is_valid(), "Face edge {} has an invalid prev face edge on the edge", id);
+
+            assert_eq!(plc.edges[plc.face_edges[face_edge.next].edge].vertices[0],
+                plc.edges[face_edge.edge].vertices[1],
+                "Next face edge {} of face edge {} does not start at the end of the face edge.", face_edge.next, id);
+            assert_eq!(plc.edges[plc.face_edges[face_edge.prev].edge].vertices[1],
+                plc.edges[face_edge.edge].vertices[0],
+                "Prev face edge {} of face edge {} does not end at the start of the face edge.", face_edge.prev, id);
+
+            assert_eq!(plc.face_edges[face_edge.next].ring, face_edge.ring,
+                "Next face edge {} of face edge {} does not point to the same face ring.", face_edge.next, id);
+            assert_eq!(plc.face_edges[face_edge.prev].ring, face_edge.ring,
+                "Prev face edge {} of face edge {} does not point to the same face ring.", face_edge.prev, id);
+
+            assert_eq!(plc.face_edges[face_edge.next_on_edge].edge, face_edge.edge,
+                "Next face edge {} on the edge of face edge {} does not point to the same edge.", face_edge.next_on_edge, id);
+            assert_eq!(plc.face_edges[face_edge.prev_on_edge].edge, face_edge.edge,
+                "Prev face edge {} on the edge of face edge {} does not point to the same edge.", face_edge.prev_on_edge, id);
+        }
+        assert_circular_lists(&plc.face_edges, |fe| fe.prev, |fe| fe.next, "face edge");
+        assert_circular_lists(&plc.face_edges, |fe| fe.prev_on_edge, |fe| fe.next_on_edge,
+            "face edge (on edge)");
+
+        // Face ring invariants
+        for (id, ring) in plc.rings.iter() {
+            match ring.element {
+                RingElement::FaceEdge(face_edge) => {
+                    assert!(face_edge.is_valid(), "Face ring {} has an invalid face edge", id);
+                    assert_eq!(plc.face_edges[face_edge].ring, id, "Face edge {} of face ring {} does not point to the face ring.", face_edge, id);
+                },
+
+                RingElement::Vertex(vertex) => {
+                    assert!(vertex.is_valid(), "Face ring {} has an invalid vertex", id);
+                    assert_eq!(plc.vertices[vertex].ring, id, "Vertex {} of face ring {} does not point to the face ring.", vertex, id);
+                },
+            }
+            assert!(ring.face.is_valid(), "Face ring {} has an invalid face.", id);
+
+            assert!(ring.next.is_valid(), "Face ring {} has an invalid next face ring.", id);
+            assert!(ring.prev.is_valid(), "Face ring {} has an invalid prev face ring.", id);
+
+            assert_eq!(plc.rings[ring.next].face, ring.face, "Next face ring {} of face ring {} does not point to the same face.", ring.next, id);
+            assert_eq!(plc.rings[ring.prev].face, ring.face, "Prev face ring {} of face ring {} does not point to the same face.", ring.prev, id);
+        }
+        assert_circular_lists(&plc.rings, |r| r.prev, |r| r.next, "face ring");
+
+        // Face invariants
+        for (id, face) in plc.faces.iter() {
+            assert!(face.ring.is_valid(), "Face {} has an invalid face ring.", id);
+            assert_eq!(plc.rings[face.ring].face, id, "Face ring {} of face {} does not point to the face.", face.ring, id);
+        }
+    }
+
+    #[cfg(test)]
+    #[track_caller]
+    fn assert_circular_lists<Id: id_map::Id + Eq + Hash + Display + Debug, Val, PF: Fn(&Val) -> Id, NF: Fn(&Val) -> Id>
+        (list: &IdMap<Id, Val>, prev_fn: PF, next_fn: NF, elem_name: &str)
+    {
+        let mut ids = list.keys().collect::<FnvHashSet<_>>();
+
+        while let Some(id) = ids.iter().next().copied() {
+            if let Some(mut bfs_loop) = bfs::bfs_loop(&id, |id| iter::once(next_fn(&list[*id]))) {
+                for id in &bfs_loop {
+                    ids.remove(id);
+                }
+
+                assert_eq!(bfs::bfs_loop(&id, |id| iter::once(prev_fn(&list[*id]))), {
+                    bfs_loop.reverse();
+                    Some(bfs_loop)
+                }, "Reverse circular list of {0} {1} is not the reverse of the forward circular list.", elem_name, id);
+            } else {
+                panic!("Circular list of {0} {1} does not cycle back to the {0}.", elem_name, id);
+            }
+        }
+    }
+
+    #[track_caller]
+    fn assert_vertices<V, E, F, I: IntoIterator<Item = VertexId>>(plc: &Plc<V, E, F>, vertices: I) {
+        let result = plc.vertex_ids().collect::<FnvHashSet<_>>();
+        let expect = vertices.into_iter().collect::<FnvHashSet<_>>();
+        assert_eq!(result, expect, "Assert vertices failed");
+    }
+
+    #[track_caller]
+    fn assert_edges<V, E, F, I: IntoIterator<Item = [VertexId; 2]>>(plc: &Plc<V, E, F>, edges: I) {
+        let result = plc.edge_map.keys().copied().collect::<FnvHashSet<_>>();
+        let expect = edges.into_iter().collect::<FnvHashSet<_>>();
+        assert_eq!(result, expect, "Assert edges failed");
+    }
+
+    fn canonicalize_faces(faces: &mut [Vec<Vec<VertexId>>]) {
+        for face in &mut *faces {
+            for ring in &mut *face {
+                // Canonicalize ring
+                *ring = (0..ring.len())
+                    .map(|i| {
+                        let mut ring = ring.clone();
+                        ring.rotate_left(i);
+                        ring
+                    }).min().unwrap();
+            }
+
+            // Canonicalize face
+            face.sort();
+        }
+
+        // Canonicalize faces
+        faces.sort();
+    }
+
+    #[track_caller]
+    fn assert_faces<V, E, F, I: IntoIterator<Item = RI>, RI: IntoIterator<Item = VI>, VI: IntoIterator<Item = VertexId>>(plc: &Plc<V, E, F>, faces: I) {
+        // This is tricky. The faces and rings could be in any order, but the vertices of each ring must be a cyclic permutation of each other.
+        
+        let mut result = plc.faces()
+            .map(|(_, face)| face.rings(plc)
+                .map(|(_, ring)| ring.vertices(plc).map(|(id, _)| id).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+        ).collect::<Vec<_>>();
+        canonicalize_faces(&mut result);
+
+        let mut expect = faces.into_iter()
+            .map(|face| face.into_iter()
+                .map(|ring| ring.into_iter().collect::<Vec<_>>()
+            ).collect::<Vec<_>>()
+        ).collect::<Vec<_>>();
+        canonicalize_faces(&mut expect);
+
+        assert_eq!(result, expect, "Assert faces failed");
+    }
+
+    fn v_ids(ids: Vec<u32>) -> Vec<VertexId> {
+        ids.into_iter().map(|id| VertexId(id)).collect()
+    }
+
+    fn e_ids(ids: Vec<[u32; 2]>) -> Vec<[VertexId; 2]> {
+        ids.into_iter().map(|[a, b]| [VertexId(a), VertexId(b)]).collect()
+    }
+
+    fn f_id(ids: Vec<Vec<u32>>) -> Vec<Vec<VertexId>> {
+        ids.into_iter().map(|ids| v_ids(ids)).collect()
+    }
+
+    fn f_ids(ids: Vec<Vec<Vec<u32>>>) -> Vec<Vec<Vec<VertexId>>> {
+        ids.into_iter().map(|ids| ids.into_iter().map(|ids| v_ids(ids)).collect()).collect()
+    }
+
+    fn plc_from_vef(num_vertices: usize, edges: Vec<[u32; 2]>, faces: Vec<Vec<Vec<u32>>>) -> Plc<(), (), ()> {
+        let mut plc = Plc::new(|| (), || (), || ());
+        (0..num_vertices)
+            .map(|_| plc.add_vertex(Pt3::origin(), ())).for_each(|_| {});
+
+        e_ids(edges).into_iter().map(|vertices| plc.add_edge(vertices, ())).for_each(|_| {});
+        f_ids(faces).into_iter().map(|face| plc.add_face(face, ())).for_each(|_| {});
+
+        plc
+    }
+
+    #[test]
+    fn test_empty() {
+        let plc = Plc::new(|| (), || (), || ());
+        assert_integrity(&plc);
+        assert_vertices(&plc, vec![]);
+        assert_edges(&plc, vec![]);
+        assert_faces(&plc, vec![] as Vec<Vec<Vec<VertexId>>>);
+    }
+
+    #[test]
+    fn test_add_vertex() {
+        let mut plc = Plc::new(|| 0, || (), || ());
+        let id = plc.add_vertex(Pt3::new(1.0, 2.0, 3.0), 1);
+
+        assert_integrity(&plc);
+        assert_vertices(&plc, vec![id]);
+        assert_edges(&plc, vec![]);
+        assert_faces(&plc, vec![] as Vec<Vec<Vec<VertexId>>>);
+        assert_eq!(plc[id].position(), Pt3::new(1.0, 2.0, 3.0));
+        assert_eq!(*plc[id].value(), 1);
+    }
+
+    #[test]
+    fn test_add_edge() {
+        let mut plc = Plc::new(|| (), || 0, || ());
+        let v = (0..3)
+            .map(|_| plc.add_vertex(Pt3::origin(), ()))
+            .collect::<Vec<_>>();
+
+        let id = plc.add_edge([v[0], v[1]], 1);
+        
+        assert_integrity(&plc);
+        assert_vertices(&plc, v_ids(vec![0, 1, 2]));
+        assert_edges(&plc, e_ids(vec![[0, 1]]));
+        assert_faces(&plc, vec![] as Vec<Vec<Vec<VertexId>>>);
+        assert_eq!(*plc[id].value(), 1);
+
+        let id = plc.add_edge_if_absent([v[0], v[1]], 2);
+        assert_eq!(*plc[id].value(), 1);
+
+        plc.add_edge([v[1], v[2]], 1);
+        assert_integrity(&plc);
+        assert_vertices(&plc, v_ids(vec![0, 1, 2]));
+        assert_edges(&plc, e_ids(vec![[0, 1], [1, 2]]));
+        assert_faces(&plc, vec![] as Vec<Vec<Vec<VertexId>>>);
+    }
+
+    #[test]
+    fn test_add_edge_all() {
+        let mut plc = Plc::new(|| (), || (), || ());
+        let v = (0..3)
+            .map(|_| plc.add_vertex(Pt3::origin(), ()))
+            .collect::<Vec<_>>();
+
+        e_ids(vec![
+            [0, 1], [1, 0], [1, 2], [2, 1], [2, 0], [0, 2]
+        ]).into_iter().map(|vertices| plc.add_edge(vertices, ())).for_each(|_| {});
+
+        assert_integrity(&plc);
+        assert_vertices(&plc, v_ids(vec![0, 1, 2]));
+        assert_edges(&plc, e_ids(vec![[0, 1], [1, 2], [2, 0], [1, 0], [2, 1], [0, 2]]));
+        assert_faces(&plc, vec![] as Vec<Vec<Vec<VertexId>>>);
+    }
+
+    #[test]
+    fn test_add_triangle() {
+        let mut plc = Plc::new(|| (), || (), || 0);
+        let v = (0..4)
+            .map(|_| plc.add_vertex(Pt3::origin(), ()))
+            .collect::<Vec<_>>();
+
+        // Triangle
+        let id = plc.add_face(f_id(vec![vec![1, 2, 3]]), 3);
+        assert_integrity(&plc);
+        assert_vertices(&plc, v_ids(vec![0, 1, 2, 3]));
+        assert_edges(&plc, e_ids(vec![[3, 1], [1, 2], [2, 3]]));
+        assert_faces(&plc, f_ids(vec![vec![vec![2, 3, 1]]]));
+        assert_eq!(*plc[id].value(), 3);
+    }
+
+    #[test]
+    fn test_add_mwb_polyhedron() {
+        let plc = plc_from_vef(6, vec![], vec![
+            vec![vec![0, 1, 2]],
+            vec![vec![0, 2, 4, 3]],
+            vec![vec![5, 4, 2, 1]],
+        ]);
+
+        assert_integrity(&plc);
+        assert_vertices(&plc, v_ids(vec![0, 1, 2, 3, 4, 5]));
+        assert_edges(&plc, e_ids(vec![[0, 1], [1, 2], [2, 0], [0, 2], [2, 4], [4, 3], [3, 0], [5, 4], [4, 2], [2, 1], [1, 5]]));
+        assert_faces(&plc, f_ids(vec![
+            vec![vec![1, 2, 0]],
+            vec![vec![2, 1, 5, 4]],
+            vec![vec![0, 2, 4, 3]],
+        ]));
+    }
+
+    #[test]
+    fn test_add_non_manifold_faces() {
+        let plc = plc_from_vef(4, vec![], vec![
+            vec![vec![0, 1, 2]],
+            vec![vec![0, 1, 3]],
+        ]);
+
+        assert_integrity(&plc);
+        assert_vertices(&plc, v_ids(vec![0, 1, 2, 3]));
+        assert_edges(&plc, e_ids(vec![[0, 1], [1, 2], [2, 0], [1, 3], [3, 0]]));
+        assert_faces(&plc, f_ids(vec![
+            vec![vec![0, 1, 2]],
+            vec![vec![0, 1, 3]],
+        ]));
+    }
+
+    #[test]
+    fn test_add_face_with_holes() {
+        let plc = plc_from_vef(8, vec![], vec![
+            vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7]],
+            vec![vec![7, 6, 5, 4]],
+        ]);
+
+        assert_integrity(&plc);
+        assert_vertices(&plc, v_ids(vec![0, 1, 2, 3, 4, 5, 6, 7]));
+        assert_edges(&plc, e_ids(vec![[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [7, 6], [6, 5], [5, 4], [4, 7]]));
+        assert_faces(&plc, f_ids(vec![
+            vec![vec![6, 5, 4, 7]],
+            vec![vec![6, 7, 4, 5], vec![0, 1, 2, 3]],
+        ]));
+    }
+
+    #[test]
+    fn test_add_face_with_isolated_vertex() {
+        let plc = plc_from_vef(8, vec![], vec![
+            vec![vec![0, 1, 2, 3], vec![4]],
+        ]);
+
+        assert_integrity(&plc);
+        assert_vertices(&plc, v_ids(vec![0, 1, 2, 3, 4, 5, 6, 7]));
+        assert_edges(&plc, e_ids(vec![[0, 1], [1, 2], [2, 3], [3, 0]]));
+        assert_faces(&plc, f_ids(vec![
+            vec![vec![0, 1, 2, 3], vec![4]],
+        ]));
+    }
+
+    #[test]
+    #[cfg(feature = "obj")]
+    fn test_load_obj() {
+        let plc = Plc::load_obj("assets/monkey.obj", || (), || (), || ()).unwrap();
+        assert_integrity(&plc);
+    }
+}

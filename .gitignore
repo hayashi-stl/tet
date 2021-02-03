@@ -1,5 +1,5 @@
 /target
 Cargo.lock
-/assets
+/ignore
 perf.data
 perf.data.old

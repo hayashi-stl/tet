@@ -38,3 +38,67 @@ pub(crate) fn hilbert_sort<V: Clone, I: IntoIterator<Item = (Pt3, V)>>(points: I
 
     points
 }
+
+// fn-traits when
+
+/// Circular linked list iterator. Not to be used raw.
+pub struct CircularListIter<C, K, VF, NF> {
+    pub(crate) common: C,
+    start: K,
+    key: K,
+    value_fn: VF,
+    next_fn: NF,
+    finished: bool,
+}
+
+impl<C, K: Copy, VF, NF> CircularListIter<C, K, VF, NF> {
+    pub(crate) fn new(common: C, start: K, value_fn: VF, next_fn: NF) -> Self {
+        Self {
+            common,
+            start,
+            key: start,
+            value_fn,
+            next_fn,
+            finished: false,
+        }
+    }
+}
+
+impl<C: Copy, K: Copy + Eq, V, VF: Fn(C, K) -> V, NF: Fn(C, K) -> K> Iterator for CircularListIter<C, K, VF, NF> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        let key = self.key;
+        let value = (self.value_fn)(self.common, self.key);
+        self.key = (self.next_fn)(self.common, self.key);
+
+        if self.key == self.start {
+            self.finished = true;
+        }
+
+        Some((key, value))
+    }
+}
+
+/// Like `Map`, but allows the use of 1 common value
+/// without capturing.
+#[derive(Clone, Debug)]
+pub struct MapWith<C, I, F> {
+    iter: I,
+    common: C,
+    combine: F,
+}
+
+impl<C: Clone, O, I: Iterator, F: FnMut(C, I::Item) -> O> Iterator for MapWith<C, I, F> {
+    type Item = O;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter
+            .next()
+            .map(|t| (self.combine)(self.common.clone(), t))
+    }
+}

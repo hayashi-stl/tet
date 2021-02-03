@@ -1158,7 +1158,7 @@ impl<V, T> TetMesh<V, T> {
     }
 
     #[cfg(feature = "obj")]
-    pub fn export_debug_obj<P: AsRef<Path>>(&self, path: P) {
+    pub fn export_debug_obj<P: AsRef<Path>>(&self, path: P) -> Result<(), obj::ObjError> {
         let solid_tets = || self.tets.values().filter(|t| !t.vertices().contains(&Self::GHOST)).enumerate();
 
         let obj = obj::ObjData {
@@ -1191,7 +1191,7 @@ impl<V, T> TetMesh<V, T> {
 
             material_libs: vec![],
         };
-        obj.save(path).unwrap();
+        obj.save(path)
     }
 }
 
