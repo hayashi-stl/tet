@@ -984,11 +984,6 @@ impl<V, T> Tets<V, T> {
             }
         }
 
-        // Build adjacency map; will need for internal links.
-        // This is why the boundary must be manifold.
-        let mut edge_map = FnvHashMap::<[VertexId; 2], TetWalker>::default();
-        edge_map.reserve(3 * boundary.len());
-
         // Check for tets that need to be duplicated and make necessary clones
         for walker in boundary.iter_mut() {
             if self.tets[walker.id()].flags.get().intersects(TetFlags::NEEDS_DUPLICATION) {
@@ -1001,6 +996,11 @@ impl<V, T> Tets<V, T> {
                 self.tets[walker.id()].set_flags(TetFlags::NEEDS_DUPLICATION);
             }
         }
+
+        // Build adjacency map; will need for internal links.
+        // This is why the boundary must be manifold.
+        let mut edge_map = FnvHashMap::<[VertexId; 2], TetWalker>::default();
+        edge_map.reserve(3 * boundary.len());
 
         for walker in &*boundary {
             // Also unmark boundary and tet duplication flags
@@ -1080,46 +1080,54 @@ impl<V, T> Tets<V, T> {
             self.vertices.insert(Vertex::new(TetWalker::new(TetId::invalid(), 0), position, value))
         };
 
-        // Go to vertex closest to position
-        while let Some(closer) = {
-            // Safe because this function's iterator is dropped on every iteration.
-            let min = unsafe {
-                self.vertex_targets_opt(closest)
-                    .filter(|v| *v != id)
-                    .min_by_key(|v| FloatOrd(self.vertex_distance2(*v, id)))
-            };
-            min.filter(|v| self.vertex_distance2(*v, id) < self.vertex_distance2(closest, id))
+        let lucky_tet = self[closest].tet.id();
+        let not_delaunay = if {
+            let vs = self[lucky_tet].vertices;
+            self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
         } {
-            closest = closer;
-        }
-
-        // Find a tet that is no longer Delaunay
-        // Safe because there was no call to vertex_tets_opt before
-        let not_delaunay = unsafe {
-            self.vertex_tets_opt(closest).find(|tet| { 
-                let vs = self[*tet].vertices();
-                self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
-            })
-        }.unwrap_or_else(|| {
-            // Rare case because the distance comparisons are not robust
-            // Safe because the previous call's iterator was dropped.
-            let mut checked = unsafe {
-                self.vertex_tets_opt(closest).collect::<FnvHashSet<_>>()
-            }; // already checked
-            let mut tets = checked.iter().flat_map(|tet| self.adjacent_tets(*tet).to_vec())
-                .collect::<FnvHashSet<_>>().into_iter().collect::<VecDeque<_>>();
-
-            while let Some(tet) = tets.pop_front() {
-                if checked.insert(tet) {
-                    let vs = self[tet].vertices();
-                    if self.in_sphere(vs[0], vs[1], vs[2], vs[3], id) {
-                        return tet;
-                    }
-                }
+            lucky_tet
+        } else {
+            // Go to vertex closest to position
+            while let Some(closer) = {
+                // Safe because this function's iterator is dropped on every iteration.
+                let min = unsafe {
+                    self.vertex_targets_opt(closest)
+                        .filter(|v| *v != id)
+                        .min_by_key(|v| FloatOrd(self.vertex_distance2(*v, id)))
+                };
+                min.filter(|v| self.vertex_distance2(*v, id) < self.vertex_distance2(closest, id))
+            } {
+                closest = closer;
             }
 
-            panic!("Expected some tet to stop being Delaunay when inserting vertex {} at {:?}", id, self[id].position())
-        });
+            // Find a tet that is no longer Delaunay
+            // Safe because there was no call to vertex_tets_opt before
+            unsafe {
+                self.vertex_tets_opt(closest).find(|tet| { 
+                    let vs = self[*tet].vertices();
+                    self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
+                })
+            }.unwrap_or_else(|| {
+                // Rare case because the distance comparisons are not robust
+                // Safe because the previous call's iterator was dropped.
+                let mut checked = unsafe {
+                    self.vertex_tets_opt(closest).collect::<FnvHashSet<_>>()
+                }; // already checked
+                let mut tets = checked.iter().flat_map(|tet| self.adjacent_tets(*tet).to_vec())
+                    .collect::<FnvHashSet<_>>().into_iter().collect::<VecDeque<_>>();
+
+                while let Some(tet) = tets.pop_front() {
+                    if checked.insert(tet) {
+                        let vs = self[tet].vertices();
+                        if self.in_sphere(vs[0], vs[1], vs[2], vs[3], id) {
+                            return tet;
+                        }
+                    }
+                }
+
+                panic!("Expected some tet to stop being Delaunay when inserting vertex {} at {:?}", id, self[id].position())
+            })
+        };
 
         // Find all non-Delaunay tets
         let (mut boundary, enclosed) = self.walker_from_tet(not_delaunay).boundary_and_enclosed(self,
