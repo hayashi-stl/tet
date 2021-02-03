@@ -10,7 +10,7 @@ use std::{
 
 pub type IdType = u32;
 
-pub(crate) trait Id: Copy {
+pub trait Id: Copy {
     fn int(self) -> IdType;
 
     fn from_int(int: IdType) -> Self;
@@ -332,7 +332,7 @@ impl<K: Id, V> Iterator for IntoIter<K, V> {
     }
 }
 
-pub(crate) struct Iter<'a, K, V> {
+pub struct Iter<'a, K, V> {
     iter: Enumerate<slice::Iter<'a, Option<V>>>,
     marker: PhantomData<K>,
 }

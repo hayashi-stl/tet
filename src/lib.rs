@@ -1,8 +1,10 @@
 mod id_map;
 mod util;
 pub mod tet;
+pub mod plc;
 
-pub use crate::tet::{Tets, TetWalker};
+pub use crate::tet::{TetMesh, TetWalker};
+pub use crate::plc::Plc;
 
 use nalgebra::{Point1, Point3, Vector3};
 
@@ -43,8 +45,10 @@ macro_rules! id {
     };
 }
 
-id!(pub struct VertexId);
-id!(pub struct TetId);
+id! {
+    /// A vertex id, both for tet meshes and PLCs
+    pub struct VertexId
+}
 
 #[macro_export]
 #[doc(hidden)]

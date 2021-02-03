@@ -4,11 +4,16 @@ use std::iter::{self, Map};
 use float_ord::FloatOrd;
 use bitflags::bitflags;
 
-use crate::{Pt1, id_map::{IdMap, IdType}};
-use crate::{Pt3, TetId, VertexId, Vec3};
+use crate::{Pt1, id_map::{self, IdMap, IdType}};
+use crate::{Pt3, VertexId, Vec3};
 use crate::util;
 use fnv::{FnvHashMap, FnvHashSet};
 use simplicity as sim;
+
+crate::id! {
+    /// A tet mesh tet id
+    pub struct TetId
+}
 
 bitflags! {
     struct VertexFlags: u32 {
@@ -242,48 +247,48 @@ impl TetWalker {
     }
 
     /// Gets the first vertex of the tet walker. This is the current vertex.
-    pub fn first<V, T>(self, mesh: &Tets<V, T>) -> VertexId {
+    pub fn first<V, T>(self, mesh: &TetMesh<V, T>) -> VertexId {
         mesh.tets[self.tet].vertices[[3, 2, 1, 0, 2, 3, 0, 1, 1, 0, 3, 2][self.edge as usize]]
     }
 
     /// Gets the second vertex of the tet walker. This is the current edge's target.
-    pub fn second<V, T>(self, mesh: &Tets<V, T>) -> VertexId {
+    pub fn second<V, T>(self, mesh: &TetMesh<V, T>) -> VertexId {
         mesh.tets[self.tet].vertices[[2, 3, 0, 1, 1, 0, 3, 2, 3, 2, 1, 0][self.edge as usize]]
     }
 
     /// Gets the third vertex of the tet walker.
-    pub fn third<V, T>(self, mesh: &Tets<V, T>) -> VertexId {
+    pub fn third<V, T>(self, mesh: &TetMesh<V, T>) -> VertexId {
         mesh.tets[self.tet].vertices[[1, 0, 3, 2, 3, 2, 1, 0, 2, 3, 0, 1][self.edge as usize]]
     }
 
     /// Gets the fourth vertex of the tet walker. This is the vertex opposite the current triangle.
-    pub fn fourth<V, T>(self, mesh: &Tets<V, T>) -> VertexId {
+    pub fn fourth<V, T>(self, mesh: &TetMesh<V, T>) -> VertexId {
         mesh.tets[self.tet].vertices[[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3][self.edge as usize]]
     }
 
     /// Gets the current edge of the tet walker.
-    pub fn edge<V, T>(self, mesh: &Tets<V, T>) -> [VertexId; 2] {
+    pub fn edge<V, T>(self, mesh: &TetMesh<V, T>) -> [VertexId; 2] {
         [self.first(mesh), self.second(mesh)]
     }
 
     /// Gets the opposite edge of the current edge on the tet walker's tet.
-    pub fn opp_edge<V, T>(self, mesh: &Tets<V, T>) -> [VertexId; 2] {
+    pub fn opp_edge<V, T>(self, mesh: &TetMesh<V, T>) -> [VertexId; 2] {
         [self.third(mesh), self.fourth(mesh)]
     }
 
     /// Gets the current triangle of the tet walker.
-    pub fn tri<V, T>(self, mesh: &Tets<V, T>) -> [VertexId; 3] {
+    pub fn tri<V, T>(self, mesh: &TetMesh<V, T>) -> [VertexId; 3] {
         [self.first(mesh), self.second(mesh), self.third(mesh)]
     }
 
     /// Gets the opposite triangle of the current vertex on the tet walker's tet.
     /// The vertices are returned in [fourth, third, second] order.
-    pub fn opp_tri<V, T>(self, mesh: &Tets<V, T>) -> [VertexId; 3] {
+    pub fn opp_tri<V, T>(self, mesh: &TetMesh<V, T>) -> [VertexId; 3] {
         [self.fourth(mesh), self.third(mesh), self.second(mesh)]
     }
 
     /// Gets the vertices of the current tet, respecting the orientation.
-    pub fn tet<V, T>(self, mesh: &Tets<V, T>) -> [VertexId; 4] {
+    pub fn tet<V, T>(self, mesh: &TetMesh<V, T>) -> [VertexId; 4] {
         [
             self.first(mesh),
             self.second(mesh),
@@ -369,7 +374,7 @@ impl TetWalker {
         to_adj,
         /// Flip the current triangle, moving to the adjacent tet on that triangle.
         /// This flips the current edge.
-        pub fn to_twin_tri<V, T>((mut) self: Self, mesh: &Tets<V, T>) -> Self {
+        pub fn to_twin_tri<V, T>((mut) self: Self, mesh: &TetMesh<V, T>) -> Self {
             let div = self.edge / 4;
             self = mesh[self.id()].opp_tets[self.edge as usize % 4];
             match div {
@@ -386,7 +391,7 @@ impl TetWalker {
         /// Flip the current triangle, moving to the adjacent tet on that triangle.
         /// This moves to some edge on that triangle.
         /// Use this method if you don't care which edge the walker ends up on.
-        pub fn to_twin_tri_any_edge<V, T>(self: Self, mesh: &Tets<V, T>) -> Self {
+        pub fn to_twin_tri_any_edge<V, T>(self: Self, mesh: &TetMesh<V, T>) -> Self {
             mesh[self.id()].opp_tets[self.edge as usize % 4]
         }
     }
@@ -409,7 +414,7 @@ impl TetWalker {
     /// Returns walkers of the 4 tets added. Each walker's 4th vertex is the new vertex.
     pub fn flip14_unchecked<V: Clone, T: Clone>(
         self,
-        mesh: &mut Tets<V, T>,
+        mesh: &mut TetMesh<V, T>,
         vertex: VertexId,
     ) -> [TetWalker; 4] {
         let id0 = self.id();
@@ -468,7 +473,7 @@ impl TetWalker {
     /// Performs a 2-to-3 flip on the mesh without checking whether
     /// such a flip produces negative-volume tets. Use at your own risk.
     /// Returns walkers of the 3 tets created. Each walker's opposite edge is the new edge.
-    pub fn flip23_unchecked<V: Clone, T: Clone>(self, mesh: &mut Tets<V, T>) -> [TetWalker; 3] {
+    pub fn flip23_unchecked<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>) -> [TetWalker; 3] {
         // Walker on other tri
         let other = self.to_adj(&mesh);
 
@@ -564,7 +569,7 @@ impl TetWalker {
     /// Performs a 3-to-2 flip on the mesh without checking whether
     /// such a flip produces negative-volume tets. Use at your own risk.
     /// Returns walkers for the 2 tets created by the flip. Each walker's opposite triangle is the new triangle.
-    pub fn flip32_unchecked<V: Clone, T: Clone>(self, mesh: &mut Tets<V, T>) -> [TetWalker; 2] {
+    pub fn flip32_unchecked<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>) -> [TetWalker; 2] {
         let other1 = self.to_twin_edge().to_adj(&mesh);
         let other2 = other1.to_twin_edge().to_adj(&mesh);
 
@@ -655,7 +660,7 @@ impl TetWalker {
     /// Each item in the boundary is a tet walker whose current triangle is a triangle of the boundary.
     pub fn boundary_and_enclosed<V, T, F: FnMut(TetId) -> bool>(
         self,
-        mesh: &Tets<V, T>,
+        mesh: &TetMesh<V, T>,
         mut pred: F,
     ) -> (Vec<TetWalker>, Vec<TetId>) {
         // Initialize intermediate boundary
@@ -722,14 +727,14 @@ impl TetWalker {
 
 /// A manifold tetrahedralization.
 #[derive(Debug)]
-pub struct Tets<V, T> {
+pub struct TetMesh<V, T> {
     vertices: IdMap<VertexId, Vertex<V>>,
     ghost_flags: Cell<VertexFlags>,
     tets: IdMap<TetId, Tet<T>>,
     default_tet: fn() -> T,
 }
 
-impl<V, T> Tets<V, T> {
+impl<V, T> TetMesh<V, T> {
     pub const GHOST: VertexId = VertexId::invalid();
 
     /// Creates a new tetrahedralization from 4 vertices because it takes
@@ -827,6 +832,16 @@ impl<V, T> Tets<V, T> {
     /// Gets the number of tets in the tet mesh.
     pub fn num_tets(&self) -> usize {
         self.tets.len()
+    }
+
+    /// Iterates over vertex ids and vertices, not including the ghost vertex.
+    pub fn vertices(&self) -> Vertices<V> {
+        self.vertices.iter()
+    }
+
+    /// Iterates over tet ids and tets, including ghost tets.
+    pub fn tets(&self) -> Tets<T> {
+        self.tets.iter()
     }
 
     /// Gets a vertex, if it exists and is solid (not ghost).
@@ -1180,7 +1195,7 @@ impl<V, T> Tets<V, T> {
     }
 }
 
-impl<V, T> Index<VertexId> for Tets<V, T> {
+impl<V, T> Index<VertexId> for TetMesh<V, T> {
     type Output = Vertex<V>;
 
     fn index(&self, index: VertexId) -> &Self::Output {
@@ -1189,7 +1204,7 @@ impl<V, T> Index<VertexId> for Tets<V, T> {
     }
 }
 
-impl<V, T> Index<TetId> for Tets<V, T> {
+impl<V, T> Index<TetId> for TetMesh<V, T> {
     type Output = Tet<T>;
 
     fn index(&self, index: TetId) -> &Self::Output {
@@ -1198,11 +1213,17 @@ impl<V, T> Index<TetId> for Tets<V, T> {
     }
 }
 
+/// Iterates over vertex ids and vertices.
+pub type Vertices<'a, V> = id_map::Iter<'a, VertexId, Vertex<V>>;
+
+/// Iterates over tet ids and tets.
+pub type Tets<'a, T> = id_map::Iter<'a, TetId, Tet<T>>;
+
 /// Iterates over tet walkers from a vertex.
 /// Each tet walker is for a unique tetrahedron and has the vertex as its first vertex.
 #[derive(Clone, Debug)]
 pub struct WalkersFromVertex<'a, V, T> {
-    mesh: &'a Tets<V, T>,
+    mesh: &'a TetMesh<V, T>,
     visited: FnvHashSet<TetId>,
     to_search: Vec<TetWalker>,
 }
@@ -1229,7 +1250,7 @@ impl<'a, V, T> Iterator for WalkersFromVertex<'a, V, T> {
 /// Uses flags and a vec instead of a hash map. Do not call walkers_from_vertex_opt again until this this dropped.
 #[derive(Clone, Debug)]
 struct WalkersFromVertexOpt<'a, V, T> {
-    mesh: &'a Tets<V, T>,
+    mesh: &'a TetMesh<V, T>,
     visited: Vec<TetId>,
     to_search: Vec<TetWalker>,
 }
@@ -1270,7 +1291,7 @@ type VertexTetsOpt<'a, V, T> = Map<WalkersFromVertexOpt<'a, V, T>, fn(TetWalker)
 
 #[derive(Clone, Debug)]
 pub struct VertexTargets<'a, V, T> {
-    mesh: &'a Tets<V, T>,
+    mesh: &'a TetMesh<V, T>,
     visited: FnvHashSet<VertexId>,
     to_search: Vec<TetWalker>,
 }
@@ -1301,7 +1322,7 @@ impl<'a, V, T> Iterator for VertexTargets<'a, V, T> {
 
 #[derive(Clone, Debug)]
 pub struct VertexTargetsOpt<'a, V, T> {
-    mesh: &'a Tets<V, T>,
+    mesh: &'a TetMesh<V, T>,
     visited: Vec<VertexId>,
     to_search: Vec<TetWalker>,
 }
@@ -1399,8 +1420,8 @@ mod tests {
         TetId(n)
     }
 
-    fn default_tets() -> Tets<(), ()> {
-        Tets::new(
+    fn default_tets() -> TetMesh<(), ()> {
+        TetMesh::new(
             [
                 (Pt3::new(0.0, 0.0, 0.0), ()),
                 (Pt3::new(0.0, 0.0, 1.0), ()),
@@ -1411,8 +1432,8 @@ mod tests {
         )
     }
 
-    fn reverse_tets() -> Tets<(), ()> {
-        Tets::new(
+    fn reverse_tets() -> TetMesh<(), ()> {
+        TetMesh::new(
             [
                 (Pt3::new(0.0, 0.0, 0.0), ()),
                 (Pt3::new(1.0, 0.0, 0.0), ()),
@@ -1424,7 +1445,7 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_tets<V, T, I: IntoIterator<Item = [u32; 4]>>(mesh: &Tets<V, T>, tets: I) {
+    fn assert_tets<V, T, I: IntoIterator<Item = [u32; 4]>>(mesh: &TetMesh<V, T>, tets: I) {
         let result = mesh.tets.iter().map(|(_, tet)| even_sort_4(tet.vertices())).collect::<FnvHashSet<_>>();
         let expect = tets.into_iter().collect::<Vec<_>>();
         assert_eq!(result.len(), expect.len());
@@ -1441,11 +1462,11 @@ mod tests {
         assert_eq!(mesh[v(1)].position(), Pt3::new(0.0, 0.0, 1.0));
         assert_eq!(mesh[v(2)].position(), Pt3::new(0.0, 1.0, 0.0));
         assert_eq!(mesh[v(3)].position(), Pt3::new(1.0, 0.0, 0.0));
-        assert_eq!(mesh.vertex(Tets::<(), ()>::GHOST).map(|v| v.value()), None);
+        assert_eq!(mesh.vertex(TetMesh::<(), ()>::GHOST).map(|v| v.value()), None);
 
         assert_eq!(mesh.num_tets(), 5);
         assert_eq!(even_sort_4(mesh[t(0)].vertices()), [v(0), v(1), v(2), v(3)]);
-        assert!(mesh[t(1)].vertices().contains(&Tets::<(), ()>::GHOST));
+        assert!(mesh[t(1)].vertices().contains(&TetMesh::<(), ()>::GHOST));
     }
 
     #[test]
@@ -1457,11 +1478,11 @@ mod tests {
         assert_eq!(mesh[v(1)].position(), Pt3::new(1.0, 0.0, 0.0));
         assert_eq!(mesh[v(2)].position(), Pt3::new(0.0, 1.0, 0.0));
         assert_eq!(mesh[v(3)].position(), Pt3::new(0.0, 0.0, 1.0));
-        assert_eq!(mesh.vertex(Tets::<(), ()>::GHOST).map(|v| v.value()), None);
+        assert_eq!(mesh.vertex(TetMesh::<(), ()>::GHOST).map(|v| v.value()), None);
 
         assert_eq!(mesh.num_tets(), 5);
         assert_eq!(even_sort_4(mesh[t(0)].vertices()), [v(0), v(1), v(3), v(2)]);
-        assert!(mesh[t(1)].vertices().contains(&Tets::<(), ()>::GHOST));
+        assert!(mesh[t(1)].vertices().contains(&TetMesh::<(), ()>::GHOST));
     }
 
     #[test]
@@ -1555,7 +1576,7 @@ mod tests {
 
                     // to_twin tri should flip the current edge and set the fourth vertex to the opposite one
                     vertices.swap(1, 0);
-                    vertices[3] = v((Tets::<(), ()>::GHOST.0 as u64 + 6
+                    vertices[3] = v((TetMesh::<(), ()>::GHOST.0 as u64 + 6
                         - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
                         as IdType);
                     assert_eq!(
@@ -1600,7 +1621,7 @@ mod tests {
                         vertices[3] = v(4);
                     } else {
                         // Internal link
-                        vertices[3] = v((Tets::<(), ()>::GHOST.0 as u64 + 10
+                        vertices[3] = v((TetMesh::<(), ()>::GHOST.0 as u64 + 10
                             - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
                             as IdType);
                     }
@@ -1630,7 +1651,7 @@ mod tests {
         assert_eq!(walkers[0].opp_edge(&mesh), walkers[1].opp_edge(&mesh));
         assert_eq!(walkers[1].opp_edge(&mesh), walkers[2].opp_edge(&mesh));
         assert!(walkers[0].opp_edge(&mesh).contains(&v(4)));
-        assert!(walkers[0].opp_edge(&mesh).contains(&Tets::<(), ()>::GHOST));
+        assert!(walkers[0].opp_edge(&mesh).contains(&TetMesh::<(), ()>::GHOST));
 
         for tet in 0..9 {
             for i in 0..12 {
@@ -1639,23 +1660,23 @@ mod tests {
 
                 // Resultant tet or opposite resultant tet
                 if vertices[3] == v(0)
-                    || (vertices.contains(&v(4)) && vertices.contains(&Tets::<(), ()>::GHOST))
+                    || (vertices.contains(&v(4)) && vertices.contains(&TetMesh::<(), ()>::GHOST))
                 {
                     vertices.swap(0, 1);
 
-                    if vertices[3] == v(4) || vertices[3] == Tets::<(), ()>::GHOST {
+                    if vertices[3] == v(4) || vertices[3] == TetMesh::<(), ()>::GHOST {
                         // Internal to external link
                         vertices[3] = v(0);
                     } else if vertices[3] == v(0) {
                         // External to internal link
                         vertices[3] = if vertices[..3].contains(&v(4)) {
-                            Tets::<(), ()>::GHOST
+                            TetMesh::<(), ()>::GHOST
                         } else {
                             v(4)
                         };
                     } else {
                         // Internal link
-                        vertices[3] = v((Tets::<(), ()>::GHOST.0 as u64 + 10
+                        vertices[3] = v((TetMesh::<(), ()>::GHOST.0 as u64 + 10
                             - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
                             as IdType);
                     }
@@ -1719,7 +1740,7 @@ mod tests {
                     } else {
                         // Internal link
                         vertices[3] = if vertices[3] == v(4) {
-                            Tets::<(), ()>::GHOST
+                            TetMesh::<(), ()>::GHOST
                         } else {
                             v(4)
                         }
@@ -1789,7 +1810,7 @@ mod tests {
 
         let walker = mesh.walker_from_tet(t(0));
         let (boundary, enclosed) = walker.flip14_unchecked(&mut mesh, v(4))[0]
-            .boundary_and_enclosed(&mesh, |t| !mesh[t].vertices().contains(&Tets::<(), ()>::GHOST));
+            .boundary_and_enclosed(&mesh, |t| !mesh[t].vertices().contains(&TetMesh::<(), ()>::GHOST));
 
         assert_eq!(boundary.into_iter().map(|w| even_sort_3(w.tri(&mesh))).collect::<FnvHashSet<_>>(), vec![
             [v(0), v(1), v(2)],
@@ -1829,7 +1850,7 @@ mod tests {
                         vertices[3] = v(4);
                     } else {
                         // Internal link
-                        vertices[3] = v((Tets::<(), ()>::GHOST.0 as u64 + 10
+                        vertices[3] = v((TetMesh::<(), ()>::GHOST.0 as u64 + 10
                             - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
                             as IdType);
                     }
@@ -1885,8 +1906,8 @@ mod tests {
                     } else {
                         // Internal link
                         vertices[3] = if vertices[3] == v(4) {
-                            Tets::<(), ()>::GHOST
-                        } else if vertices[3] == Tets::<(), ()>::GHOST {
+                            TetMesh::<(), ()>::GHOST
+                        } else if vertices[3] == TetMesh::<(), ()>::GHOST {
                             v(4)
                         } else {
                             v(6 - vertices
@@ -1970,10 +1991,10 @@ mod tests {
             (),
         ));
 
-        assert!(mesh.in_sphere(Tets::<(), ()>::GHOST, v(1), v(2), v(3), v(4)));
-        assert!(!mesh.in_sphere(v(0), Tets::<(), ()>::GHOST, v(2), v(3), v(4)));
-        assert!(!mesh.in_sphere(v(0), v(1), Tets::<(), ()>::GHOST, v(3), v(4)));
-        assert!(!mesh.in_sphere(v(0), v(1), v(2), Tets::<(), ()>::GHOST, v(4)));
+        assert!(mesh.in_sphere(TetMesh::<(), ()>::GHOST, v(1), v(2), v(3), v(4)));
+        assert!(!mesh.in_sphere(v(0), TetMesh::<(), ()>::GHOST, v(2), v(3), v(4)));
+        assert!(!mesh.in_sphere(v(0), v(1), TetMesh::<(), ()>::GHOST, v(3), v(4)));
+        assert!(!mesh.in_sphere(v(0), v(1), v(2), TetMesh::<(), ()>::GHOST, v(4)));
     }
 
     #[test]
@@ -1990,7 +2011,7 @@ mod tests {
 
     #[test]
     fn test_delaunay_tets_single() {
-        let mesh = Tets::<(), ()>::delaunay_from_vertices(vec![
+        let mesh = TetMesh::<(), ()>::delaunay_from_vertices(vec![
             (Pt3::new(0.0, 0.0, 0.0), ()),
             (Pt3::new(1.0, 0.0, 0.0), ()),
             (Pt3::new(0.0, 1.0, 0.0), ()),
@@ -2009,7 +2030,7 @@ mod tests {
 
     #[test]
     fn test_delaunay_tets_multiple() {
-        let mesh = Tets::<(), ()>::delaunay_from_vertices(vec![
+        let mesh = TetMesh::<(), ()>::delaunay_from_vertices(vec![
             (Pt3::new(0.0, 0.0, 0.0), ()),
             (Pt3::new(1.0, 0.0, 0.0), ()),
             (Pt3::new(0.0, 1.0, 0.0), ()),
@@ -2038,7 +2059,7 @@ mod tests {
     #[test]
     fn test_delaunay_tets_same_position() {
         // Simulation of simplicity is used. This should be perfectly fine.
-        let _mesh = Tets::<(), ()>::delaunay_from_vertices(vec![
+        let _mesh = TetMesh::<(), ()>::delaunay_from_vertices(vec![
             (Pt3::new(0.0, 0.0, 0.0), ()),
             (Pt3::new(0.0, 0.0, 0.0), ()),
             (Pt3::new(1.0, 0.0, 0.0), ()),

@@ -1,6 +1,6 @@
 //! Tetrahedralize a random point set
 
-use tet::Tets;
+use tet::TetMesh;
 
 use nalgebra::Point3;
 use rand::distributions::{Distribution, Uniform};
@@ -21,7 +21,7 @@ fn main() {
         });
 
     let now = std::time::Instant::now();
-    let mesh = Tets::<(), ()>::delaunay_from_vertices(data, || ());
+    let mesh = TetMesh::<(), ()>::delaunay_from_vertices(data, || ());
     println!("Generated in {}ms", now.elapsed().as_millis());
     println!("Num tets including ghosts: {:?}", mesh.num_tets());
 }

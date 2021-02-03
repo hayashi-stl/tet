@@ -1,7 +1,7 @@
 //! Tetrahedralize a random point set
 
 use rand_distr::UnitSphere;
-use tet::Tets;
+use tet::TetMesh;
 
 use nalgebra::Point3;
 use rand::distributions::Distribution;
@@ -19,6 +19,6 @@ fn main() {
             (Pt3::new(vals[0], vals[1], vals[2]), ())
         }).collect::<Vec<_>>();
 
-    let mesh = Tets::<(), ()>::delaunay_from_vertices(data, || ());
+    let mesh = TetMesh::<(), ()>::delaunay_from_vertices(data, || ());
     println!("Num tets including ghosts: {:?}", mesh.num_tets());
 }

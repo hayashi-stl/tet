@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use tet::Tets;
+use tet::TetMesh;
 
 use nalgebra::Point3;
 use rand::distributions::{Distribution, Uniform};
@@ -21,7 +21,7 @@ fn delaunay_tets_random(c: &mut Criterion) {
         }).collect::<Vec<_>>();
 
     c.bench_function("delaunay_tets_random", |b| {
-        b.iter_with_large_drop(|| Tets::<(), ()>::delaunay_from_vertices(data.iter().copied(), || ()))
+        b.iter_with_large_drop(|| TetMesh::<(), ()>::delaunay_from_vertices(data.iter().copied(), || ()))
     });
 }
 
@@ -33,7 +33,7 @@ fn delaunay_tets_cospherical(c: &mut Criterion) {
         }).collect::<Vec<_>>();
 
     c.bench_function("delaunay_tets_cospherical", |b| {
-        b.iter_with_large_drop(|| Tets::<(), ()>::delaunay_from_vertices(data.iter().copied(), || ()))
+        b.iter_with_large_drop(|| TetMesh::<(), ()>::delaunay_from_vertices(data.iter().copied(), || ()))
     });
 }
 
