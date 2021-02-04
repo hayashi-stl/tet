@@ -82,11 +82,17 @@ bitflags! {
 struct UndirEdge {
     vertices: [VertexId; 2],
     flags: Cell<UndirEdgeFlags>,
+    /// Used by flip_in_vertex_unchecked.
+    boundary_walker: TetWalker,
 }
 
 impl UndirEdge {
     fn new(vertices: [VertexId; 2]) -> Self {
-        Self { vertices, flags: Cell::new(UndirEdgeFlags::empty()) }
+        Self {
+            vertices,
+            flags: Cell::new(UndirEdgeFlags::empty()),
+            boundary_walker: TetWalker::new(TetId::invalid(), 0),
+        }
     }
 
     fn set_flags(&self, flag: UndirEdgeFlags) {
@@ -830,22 +836,6 @@ impl<V, T> TetMesh<V, T> {
         V: Clone,
         T: Clone,
     {
-        Self::with_ids(
-            [
-                (VertexId(0), vertices[0].0, vertices[0].1.clone()),
-                (VertexId(1), vertices[1].0, vertices[1].1.clone()),
-                (VertexId(2), vertices[2].0, vertices[2].1.clone()),
-                (VertexId(3), vertices[3].0, vertices[3].1.clone()),
-            ],
-            default_tet,
-        )
-    }
-
-    fn with_ids(vertices: [(VertexId, Pt3, V); 4], default_tet: fn() -> T) -> Self
-    where
-        V: Clone,
-        T: Clone,
-    {
         let mut tets = Self {
             vertices: IdMap::default(),
             ghost_flags: Cell::new(VertexFlags::empty()),
@@ -854,11 +844,29 @@ impl<V, T> TetMesh<V, T> {
             default_tet,
         };
 
+        tets.with_ids(
+            [
+                (VertexId(0), vertices[0].0, vertices[0].1.clone()),
+                (VertexId(1), vertices[1].0, vertices[1].1.clone()),
+                (VertexId(2), vertices[2].0, vertices[2].1.clone()),
+                (VertexId(3), vertices[3].0, vertices[3].1.clone()),
+            ],
+            default_tet,
+        );
+
+        tets
+    }
+
+    fn with_ids(&mut self, vertices: [(VertexId, Pt3, V); 4], default_tet: fn() -> T)
+    where
+        V: Clone,
+        T: Clone,
+    {
         // Make sure the tet is oriented positive
         let swap = !sim::orient_3d(&vertices, |l, i| l[i].1.coords, 0, 1, 2, 3);
 
         let tw = |id, edge| TetWalker::new(TetId(id), edge);
-        tets.vertices
+        self.vertices
             .extend(vertices.iter().enumerate().map(|(i, (id, pos, v))| {
                 // I'm adding the solid (not ghost) tet first, so TetId(0) is fine here
                 (*id, Vertex::new(tw(0, 3 - i as IdType), *pos, v.clone()))
@@ -884,7 +892,7 @@ impl<V, T> TetMesh<V, T> {
             [vi[3], vi[4]],
         ];
 
-        let ei = tets.edges.extend_values(edges.iter().map(|vs| UndirEdge::new(*vs)))
+        let ei = self.edges.extend_values(edges.iter().map(|vs| UndirEdge::new(*vs)))
             .collect::<Vec<_>>();
 
         let vertices_arr = [
@@ -911,7 +919,7 @@ impl<V, T> TetMesh<V, T> {
             [tw(3, 8), tw(2, 5), tw(1, 2), tw(0, 7)],
         ];
 
-        tets.tets
+        self.tets
             .extend_values(
                 vertices_arr
                     .iter()
@@ -921,8 +929,6 @@ impl<V, T> TetMesh<V, T> {
                         *edges, default_tet())),
             )
             .for_each(|_| {});
-
-        tets
     }
 
     /// Gets a reference to the flags of the vertex.
@@ -1170,8 +1176,7 @@ impl<V, T> TetMesh<V, T> {
 
         // Build adjacency map; will need for internal links.
         // This is why the boundary must be manifold.
-        let mut edge_map = FnvHashMap::<[VertexId; 2], TetWalker>::default();
-        edge_map.reserve(3 * boundary.len());
+        // Adjacency map is now stored in edges.
 
         for walker in &*boundary {
             // Also unmark boundary and tet duplication flags
@@ -1195,26 +1200,34 @@ impl<V, T> TetMesh<V, T> {
                 .get_mut(tri[2])
                 .map(|v| v.tet = walker.to_pfe());
 
-            let tri = walker.tri(&self);
-            edge_map.insert([tri[0], tri[1]], *walker);
-            edge_map.insert([tri[1], tri[2]], walker.to_nfe());
-            edge_map.insert([tri[2], tri[0]], walker.to_pfe());
-        }
+            // Edge adjacency and internal links
+            for walker in &[*walker, walker.to_nfe(), walker.to_pfe()] {
+                let edge = walker.undir_edge(self);
+                let boundary_walker = &mut self.edges[edge].boundary_walker;
+                if boundary_walker.id().is_valid() {
+                    let walker = walker.to_twin_edge();
+                    let adj = boundary_walker.to_twin_edge();
 
-        // Internal-external links didn't need changing.
-        // External-internal links got fixed.
-        // Now fix internal links.
-        for ([v0, v1], walker) in &edge_map {
-            let walker = walker.to_twin_edge();
-            let adj = edge_map[&[*v1, *v0]].to_twin_edge();
+                    // Calling `walker.to_adj(&self)` should give `adj`
+                    self.tets[walker.id()].opp_tets[walker.edge as usize % 4] = match walker.edge / 4 {
+                        0 => adj,
+                        1 => adj.to_nfe(),
+                        2 => adj.to_pfe(),
+                        _ => unreachable!(),
+                    };
 
-            // Calling `walker.to_adj(&self)` should give `adj`
-            self.tets[walker.id()].opp_tets[walker.edge as usize % 4] = match walker.edge / 4 {
-                0 => adj,
-                1 => adj.to_nfe(),
-                2 => adj.to_pfe(),
-                _ => unreachable!(),
-            };
+                    // Symmetrically
+                    self.tets[adj.id()].opp_tets[adj.edge as usize % 4] = match adj.edge / 4 {
+                        0 => walker,
+                        1 => walker.to_nfe(),
+                        2 => walker.to_pfe(),
+                        _ => unreachable!(),
+                    };
+                    boundary_walker.tet = TetId::invalid();
+                } else {
+                    *boundary_walker = *walker;
+                }
+            }
         }
 
         // Add edges.
@@ -1254,7 +1267,20 @@ impl<V, T> TetMesh<V, T> {
         V: Clone,
         T: Clone,
     {
+        let mut mesh = Self {
+            vertices: IdMap::default(),
+            ghost_flags: Cell::new(VertexFlags::empty()),
+            edges: IdMap::default(),
+            tets: IdMap::default(),
+            default_tet,
+        };
         let mut vertices = util::hilbert_sort(vertices);
+
+        // Pre-add the vertices to keep the id map dense
+        mesh.vertices.extend_values((0..vertices.len()).map(|v| 
+            Vertex::new(TetWalker::new(TetId::invalid(), 0), Pt3::origin(), vertices[0].2.clone())))
+            .for_each(|_| {});
+
         let mut drain = vertices.drain(0..4);
         let v0 = drain.next().unwrap();
         let v1 = drain.next().unwrap();
@@ -1263,7 +1289,7 @@ impl<V, T> TetMesh<V, T> {
         std::mem::drop(drain);
         let v3_id = v3.0;
 
-        let mut mesh = Self::with_ids([v0, v1, v2, v3], default_tet);
+        mesh.with_ids([v0, v1, v2, v3], default_tet);
         // include v3's id to avoid indexing out of bounds
         let ids = iter::once(v3_id)
             .chain(vertices.iter().map(|v| v.0))

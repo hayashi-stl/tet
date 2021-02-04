@@ -7,6 +7,7 @@ use std::{
     ops::{Index, IndexMut},
     slice,
 };
+use bitvec::prelude::*;
 
 pub type IdType = u32;
 
@@ -21,7 +22,7 @@ pub trait Id: Copy {
 #[derive(Clone, Debug)]
 pub(crate) struct IdMap<K, V> {
     map: Vec<Option<V>>,
-    free: FnvHashSet<IdType>,
+    free: Vec<IdType>,
     marker: PhantomData<K>,
 }
 
@@ -29,7 +30,7 @@ impl<K, V> Default for IdMap<K, V> {
     fn default() -> Self {
         Self {
             map: vec![],
-            free: FnvHashSet::default(),
+            free: vec![],
             marker: PhantomData,
         }
     }
@@ -60,14 +61,12 @@ impl<K: Id, V> IdMap<K, V> {
 
     /// Inserts a value into the map and returns the key for that value.
     pub(crate) fn insert(&mut self, value: V) -> K {
-        if self.free.is_empty() {
-            self.map.push(Some(value));
-            K::from_int(self.map.len() as IdType - 1)
-        } else {
-            let key = self.free.iter().next().copied().unwrap();
-            self.free.remove(&key);
+        if let Some(key) = self.free.pop() {
             self.map[key as usize] = Some(value);
             K::from_int(key)
+        } else {
+            self.map.push(Some(value));
+            K::from_int(self.map.len() as IdType - 1)
         }
     }
 
@@ -82,7 +81,7 @@ impl<K: Id, V> IdMap<K, V> {
         } else {
             let old = std::mem::replace(&mut self.map[key.int() as usize], Some(value));
             if old.is_none() {
-                self.free.remove(&key.int());
+                self.free.remove(self.free.iter().position(|k| *k == key.int()).unwrap());
             }
             old
         }
@@ -109,7 +108,7 @@ impl<K: Id, V> IdMap<K, V> {
             .take();
 
         if opt_value.is_some() {
-            self.free.insert(key.int());
+            self.free.push(key.int());
         }
 
         opt_value
