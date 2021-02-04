@@ -24,7 +24,7 @@ fn main() {
         });
 
         let plc = Plc::load_obj(input, || (), || (), || ()).expect("Could not load input");
-        if let Err(err) = plc.validate(0.0015) {
+        if let Err(err) = plc.validate(0.001) {
             panic!("{}", err)
         }
 

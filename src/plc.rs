@@ -557,10 +557,9 @@ impl<V, E, F> Plc<V, E, F> {
             for (vertex, point) in points {
                 // Half the tolerance because the plane is in the middle.
                 // Intersection tests should still work near the edge of the coplanarity tolerance.
-                let dist = (point - face.plane.0).dot(&face.plane.1);
+                let dist = (point - face.plane.0).dot(&face.plane.1).abs();
                 if dist >= distance_tolerance / 2.0 {
                     fails.push((vertex, dist));
-                    break;
                 }
             }
             if !fails.is_empty() {

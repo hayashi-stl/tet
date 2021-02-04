@@ -1,6 +1,6 @@
 use bitflags::bitflags;
 use float_ord::FloatOrd;
-use std::iter::{self, Map};
+use std::{hint::unreachable_unchecked, iter::{self, Map}};
 use std::ops::Index;
 use std::{
     cell::Cell,
@@ -19,6 +19,11 @@ use fnv::{FnvHashMap, FnvHashSet};
 use simplicity as sim;
 
 crate::id! {
+    /// An undirected edge id
+    struct UndirEdgeId
+}
+
+crate::id! {
     /// A tet mesh tet id
     pub struct TetId
 }
@@ -27,6 +32,9 @@ bitflags! {
     struct VertexFlags: u32 {
         /// Whether this tet has been visited by vertex_targets_opt
         const VERTEX_TARGETS = 1 << 0;
+        /// Whether an edge from this vertex to the new vertex has been added.
+        /// This is used in flip_in_vertex_unchecked.
+        const EDGE_ADDED = 1 << 1;
     }
 }
 
@@ -57,6 +65,36 @@ impl<V> Vertex<V> {
     /// Gets the value of this vertex.
     pub fn value(&self) -> &V {
         &self.value
+    }
+
+    // There is no set_flags or get_flags method because of the ghost vertex.
+}
+
+bitflags! {
+    struct UndirEdgeFlags: u32 {
+        /// Whether this edge is part of the boundary. Used in flip_in_vertex_unchecked.
+        const BOUNDARY = 1 << 0;
+    }
+}
+
+/// An undirected edge just stores its vertices.
+#[derive(Clone, Debug)]
+struct UndirEdge {
+    vertices: [VertexId; 2],
+    flags: Cell<UndirEdgeFlags>,
+}
+
+impl UndirEdge {
+    fn new(vertices: [VertexId; 2]) -> Self {
+        Self { vertices, flags: Cell::new(UndirEdgeFlags::empty()) }
+    }
+
+    fn set_flags(&self, flag: UndirEdgeFlags) {
+        self.flags.set(self.flags.get() | flag);
+    }
+
+    fn clear_flags(&self, flag: UndirEdgeFlags) {
+        self.flags.set(self.flags.get() & !flag);
     }
 }
 
@@ -90,16 +128,18 @@ bitflags! {
 pub struct Tet<T> {
     vertices: [VertexId; 4],
     opp_tets: [TetWalker; 4],
+    edges: [UndirEdgeId; 6],
     flags: Cell<TetFlags>,
     value: T,
 }
 
 impl<T> Tet<T> {
-    fn new(vertices: [VertexId; 4], opp_tets: [TetWalker; 4], value: T) -> Self {
+    fn new(vertices: [VertexId; 4], opp_tets: [TetWalker; 4], edges: [UndirEdgeId; 6], value: T) -> Self {
         Self {
             vertices,
             opp_tets,
             flags: Cell::new(TetFlags::empty()),
+            edges,
             value,
         }
     }
@@ -310,6 +350,16 @@ impl TetWalker {
         self.tet
     }
 
+    /// Gets the current undirected edge index.
+    fn undir_edge_index(self) -> usize {
+        [0, 0, 1, 1, 2, 3, 3, 2, 4, 5, 4, 5][self.edge as usize]
+    }
+
+    /// Gets the current undirected edge id.
+    fn undir_edge<V, T>(self, mesh: &TetMesh<V, T>) -> UndirEdgeId {
+        mesh.tets[self.id()].edges[self.undir_edge_index()]
+    }
+
     crate::alias! {
         to_nfe,
         /// Advance to the next edge in the current triangle.
@@ -448,6 +498,10 @@ impl TetWalker {
             .get_mut(vs[3])
             .map(|v| v.tet = TetWalker::new(id1, 0));
 
+        // Add new edges
+        let es = mesh.edges.extend_values((0..4).map(|i|
+            UndirEdge::new([vs[i], vertex]))).collect::<Vec<_>>();
+
         // Update tets
         // Note that adjacent tets need to change their opposite tet ids,
         // but not their opposite tet edge indexes because they refer to the same face.
@@ -455,21 +509,33 @@ impl TetWalker {
         mesh.tets[id0].opp_tets[1] = TetWalker::new(id1, 0);
         mesh.tets[id0].opp_tets[2] = TetWalker::new(id2, 4);
         mesh.tets[id0].opp_tets[3] = TetWalker::new(id3, 8);
+        mesh.tets[id0].edges[1] = es[1];
+        mesh.tets[id0].edges[5] = es[2];
+        mesh.tets[id0].edges[3] = es[3];
 
         mesh.tets[id1].vertices[1] = vertex;
         mesh.tets[id1].opp_tets[2] = TetWalker::new(id2, 9);
         mesh.tets[id1].opp_tets[3] = TetWalker::new(id3, 5);
         mesh.tets[id1].opp_tets[0] = TetWalker::new(id0, 1);
+        mesh.tets[id1].edges[2] = es[2];
+        mesh.tets[id1].edges[4] = es[3];
+        mesh.tets[id1].edges[1] = es[0];
 
         mesh.tets[id2].vertices[2] = vertex;
         mesh.tets[id2].opp_tets[3] = TetWalker::new(id3, 2);
         mesh.tets[id2].opp_tets[0] = TetWalker::new(id0, 6);
         mesh.tets[id2].opp_tets[1] = TetWalker::new(id1, 10);
+        mesh.tets[id2].edges[0] = es[3];
+        mesh.tets[id2].edges[5] = es[0];
+        mesh.tets[id2].edges[2] = es[1];
 
         mesh.tets[id3].vertices[3] = vertex;
         mesh.tets[id3].opp_tets[0] = TetWalker::new(id0, 11);
         mesh.tets[id3].opp_tets[1] = TetWalker::new(id1, 7);
         mesh.tets[id3].opp_tets[2] = TetWalker::new(id2, 3);
+        mesh.tets[id3].edges[3] = es[0];
+        mesh.tets[id3].edges[4] = es[1];
+        mesh.tets[id3].edges[0] = es[2];
 
         // Update adjacent tets' opposite indexes
         let ids = [id0, id1, id2, id3];
@@ -496,53 +562,36 @@ impl TetWalker {
         let id0 = self.id();
         let id1 = other.id();
         let id2 = mesh.tets.insert(mesh.tets[id0].clone());
+        let ids = [id0, id1, id2];
 
         // Fix tet walkers on adjacent tets
-        let walk0t = self.to_perm(Permutation::_1032);
-        let adj0t = walk0t.to_adj(&mesh);
-        let walker = &mut mesh.tets[adj0t.id()].opp_tets[adj0t.edge as usize % 4];
-        *walker = TetWalker::new(
-            id0,
-            Self::PERMUTATION_INV[walk0t.edge as usize][walker.edge as usize],
-        );
-
-        let walk1t = self.to_perm(Permutation::_0231);
-        let adj1t = walk1t.to_adj(&mesh);
-        let walker = &mut mesh.tets[adj1t.id()].opp_tets[adj1t.edge as usize % 4];
-        *walker = TetWalker::new(
-            id1,
-            Self::PERMUTATION_INV[walk1t.edge as usize][walker.edge as usize],
-        );
-
-        let walk2t = self.to_perm(Permutation::_2130);
-        let adj2t = walk2t.to_adj(&mesh);
-        let walker = &mut mesh.tets[adj2t.id()].opp_tets[adj2t.edge as usize % 4];
-        *walker = TetWalker::new(
-            id2,
-            Self::PERMUTATION_INV[walk2t.edge as usize][walker.edge as usize],
-        );
+        let mut adj_t = [TetWalker::new(TetId::invalid(), 0); 3];
+        for (i, perm) in [Permutation::_1032, Permutation::_0231, Permutation::_2130].iter().enumerate() {
+            let walk_t = self.to_perm(*perm);
+            adj_t[i] = walk_t.to_adj(&mesh);
+            let walker = &mut mesh.tets[adj_t[i].id()].opp_tets[adj_t[i].edge as usize % 4];
+            *walker = TetWalker::new(
+                ids[i],
+                Self::PERMUTATION_INV[walk_t.edge as usize][walker.edge as usize],
+            );
+        }
 
         // Bottom tets; permutations are a little different
-        let adj0b = other.to_perm(Permutation::_1032).to_adj(&mesh);
-        let walker = &mut mesh.tets[adj0b.id()].opp_tets[adj0b.edge as usize % 4];
-        *walker = TetWalker::new(
-            id0,
-            Self::PERMUTATION_INV[other.edge as usize][walker.edge as usize],
-        );
-
-        let adj1b = other.to_perm(Permutation::_2130).to_adj(&mesh);
-        let walker = &mut mesh.tets[adj1b.id()].opp_tets[adj1b.edge as usize % 4];
-        *walker = TetWalker::new(
-            id1,
-            Self::PERMUTATION_INV[other.to_nfe().edge as usize][walker.edge as usize],
-        );
-
-        let adj2b = other.to_perm(Permutation::_0231).to_adj(&mesh);
-        let walker = &mut mesh.tets[adj2b.id()].opp_tets[adj2b.edge as usize % 4];
-        *walker = TetWalker::new(
-            id2,
-            Self::PERMUTATION_INV[other.to_pfe().edge as usize][walker.edge as usize],
-        );
+        let mut adj_b = [TetWalker::new(TetId::invalid(), 0); 3];
+        for (i, perm) in [Permutation::_1032, Permutation::_2130, Permutation::_0231].iter().enumerate() {
+            adj_b[i] = other.to_perm(*perm).to_adj(&mesh);
+            let walker = &mut mesh.tets[adj_b[i].id()].opp_tets[adj_b[i].edge as usize % 4];
+            let edge = match i {
+                0 => other.edge,
+                1 => other.to_nfe().edge,
+                2 => other.to_pfe().edge,
+                _ => unsafe { unreachable_unchecked() }, // i is in 0..3
+            };
+            *walker = TetWalker::new(
+                ids[i],
+                Self::PERMUTATION_INV[edge as usize][walker.edge as usize],
+            );
+        }
 
         // Introduce the 3 new tets
         let ([v1, v0, v2, v3], v4) = (self.tet(&mesh), other.fourth(&mesh));
@@ -564,26 +613,24 @@ impl TetWalker {
             .get_mut(v4)
             .map(|v| v.tet = TetWalker::new(id0, 0));
 
-        let tet = &mut mesh.tets[id0];
-        tet.vertices = [v0, v1, v3, v4];
-        tet.opp_tets[0] = TetWalker::new(id1, 1);
-        tet.opp_tets[1] = TetWalker::new(id2, 0);
-        tet.opp_tets[2] = TetWalker::new(adj0b.id(), adj0b.edge);
-        tet.opp_tets[3] = TetWalker::new(adj0t.id(), adj0t.edge);
+        let edge = mesh.edges.insert(UndirEdge::new([v3, v4]));
 
-        let tet = &mut mesh.tets[id1];
-        tet.vertices = [v1, v2, v3, v4];
-        tet.opp_tets[0] = TetWalker::new(id2, 1);
-        tet.opp_tets[1] = TetWalker::new(id0, 0);
-        tet.opp_tets[2] = TetWalker::new(adj1b.id(), adj1b.edge);
-        tet.opp_tets[3] = TetWalker::new(adj1t.id(), adj1t.edge);
+        for (i, [va, vb]) in [[v0, v1], [v1, v2], [v2, v0]].iter().enumerate() {
+            let tet = &mut mesh.tets[ids[i]];
+            tet.vertices = [*va, *vb, v3, v4];
+            tet.opp_tets[0] = TetWalker::new(ids[(i + 1) % 3], 1);
+            tet.opp_tets[1] = TetWalker::new(ids[(i + 2) % 3], 0);
+            tet.opp_tets[2] = TetWalker::new(adj_b[i].id(), adj_b[i].edge);
+            tet.opp_tets[3] = TetWalker::new(adj_t[i].id(), adj_t[i].edge);
+            tet.edges[0] = edge;
 
-        let tet = &mut mesh.tets[id2];
-        tet.vertices = [v2, v0, v3, v4];
-        tet.opp_tets[0] = TetWalker::new(id0, 1);
-        tet.opp_tets[1] = TetWalker::new(id1, 0);
-        tet.opp_tets[2] = TetWalker::new(adj2b.id(), adj2b.edge);
-        tet.opp_tets[3] = TetWalker::new(adj2t.id(), adj2t.edge);
+            // Fix undirected edge ids
+            mesh.tets[ids[i]].edges[1] = adj_t[i].undir_edge(mesh);
+            mesh.tets[ids[i]].edges[2] = adj_t[i].to_pfe().undir_edge(mesh);
+            mesh.tets[ids[i]].edges[3] = adj_b[i].to_pfe().undir_edge(mesh);
+            mesh.tets[ids[i]].edges[4] = adj_b[i].to_nfe().undir_edge(mesh);
+            mesh.tets[ids[i]].edges[5] = adj_t[i].to_nfe().undir_edge(mesh);
+        }
 
         [
             TetWalker::new(id0, 3),
@@ -598,59 +645,34 @@ impl TetWalker {
     pub fn flip32_unchecked<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>) -> [TetWalker; 2] {
         let other1 = self.to_twin_edge().to_adj(&mesh);
         let other2 = other1.to_twin_edge().to_adj(&mesh);
+        let old_walkers = [self, other1, other2];
 
         let id0 = self.id();
         let id1 = other1.id();
 
         // Fix tet walkers on adjacent tets
-        let adj0t = self.to_opp_edge().to_adj(&mesh);
-        let walker = &mut mesh.tets[adj0t.id()].opp_tets[adj0t.edge as usize % 4];
-        *walker = TetWalker::new(
-            id0,
-            Self::PERMUTATION_INV[self.to_perm(Permutation::_3210).edge as usize]
-                [walker.edge as usize],
-        );
-
-        let adj1t = other1.to_opp_edge().to_adj(&mesh);
-        let walker = &mut mesh.tets[adj1t.id()].opp_tets[adj1t.edge as usize % 4];
-        *walker = TetWalker::new(
-            id0,
-            Self::PERMUTATION_INV[other1.to_perm(Permutation::_2130).edge as usize]
-                [walker.edge as usize],
-        );
-
-        let adj2t = other2.to_opp_edge().to_adj(&mesh);
-        let walker = &mut mesh.tets[adj2t.id()].opp_tets[adj2t.edge as usize % 4];
-        *walker = TetWalker::new(
-            id0,
-            Self::PERMUTATION_INV[other2.to_perm(Permutation::_1320).edge as usize]
-                [walker.edge as usize],
-        );
+        let mut adj_t = [TetWalker::new(TetId::invalid(), 0); 3];
+        for (i, perm) in [Permutation::_3210, Permutation::_2130, Permutation::_1320].iter().enumerate() {
+            adj_t[i] = old_walkers[i].to_opp_edge().to_adj(&mesh);
+            let walker = &mut mesh.tets[adj_t[i].id()].opp_tets[adj_t[i].edge as usize % 4];
+            *walker = TetWalker::new(
+                id0,
+                Self::PERMUTATION_INV[old_walkers[i].to_perm(*perm).edge as usize]
+                    [walker.edge as usize],
+            );
+        }
 
         // Bottom
-        let adj0b = self.to_perm(Permutation::_3210).to_adj(&mesh);
-        let walker = &mut mesh.tets[adj0b.id()].opp_tets[adj0b.edge as usize % 4];
-        *walker = TetWalker::new(
-            id1,
-            Self::PERMUTATION_INV[self.to_perm(Permutation::_2301).edge as usize]
-                [walker.edge as usize],
-        );
-
-        let adj1b = other1.to_perm(Permutation::_3210).to_adj(&mesh);
-        let walker = &mut mesh.tets[adj1b.id()].opp_tets[adj1b.edge as usize % 4];
-        *walker = TetWalker::new(
-            id1,
-            Self::PERMUTATION_INV[other1.to_perm(Permutation::_0231).edge as usize]
-                [walker.edge as usize],
-        );
-
-        let adj2b = other2.to_perm(Permutation::_3210).to_adj(&mesh);
-        let walker = &mut mesh.tets[adj2b.id()].opp_tets[adj2b.edge as usize % 4];
-        *walker = TetWalker::new(
-            id1,
-            Self::PERMUTATION_INV[other2.to_perm(Permutation::_3021).edge as usize]
-                [walker.edge as usize],
-        );
+        let mut adj_b = [TetWalker::new(TetId::invalid(), 0); 3];
+        for (i, perm) in [Permutation::_2301, Permutation::_0231, Permutation::_3021].iter().enumerate() {
+            adj_b[i] = old_walkers[i].to_perm(Permutation::_3210).to_adj(&mesh);
+            let walker = &mut mesh.tets[adj_b[i].id()].opp_tets[adj_b[i].edge as usize % 4];
+            *walker = TetWalker::new(
+                id1,
+                Self::PERMUTATION_INV[old_walkers[i].to_perm(*perm).edge as usize]
+                    [walker.edge as usize],
+            );
+        }
 
         // Introduce the 2 new tets
         let ([v3, v4, v1, v0], v2) = (self.tet(&mesh), other1.fourth(&mesh));
@@ -674,18 +696,31 @@ impl TetWalker {
 
         let tet = &mut mesh.tets[id0];
         tet.vertices = [v0, v1, v2, v3];
-        tet.opp_tets[0] = TetWalker::new(adj2t.id(), adj2t.to_nfe().edge);
-        tet.opp_tets[1] = TetWalker::new(adj1t.id(), adj1t.to_pfe().edge);
-        tet.opp_tets[2] = TetWalker::new(adj0t.id(), adj0t.edge);
+        tet.opp_tets[0] = TetWalker::new(adj_t[2].id(), adj_t[2].to_nfe().edge);
+        tet.opp_tets[1] = TetWalker::new(adj_t[1].id(), adj_t[1].to_pfe().edge);
+        tet.opp_tets[2] = TetWalker::new(adj_t[0].id(), adj_t[0].edge);
         tet.opp_tets[3] = TetWalker::new(id1, 3);
+        mesh.tets[id0].edges[0] = adj_t[1].to_pfe().undir_edge(mesh);
+        mesh.tets[id0].edges[1] = adj_t[0].undir_edge(mesh);
+        mesh.tets[id0].edges[2] = adj_t[2].undir_edge(mesh);
+        mesh.tets[id0].edges[3] = adj_t[0].to_pfe().undir_edge(mesh);
+        mesh.tets[id0].edges[4] = adj_t[2].to_pfe().undir_edge(mesh);
+        mesh.tets[id0].edges[5] = adj_t[1].undir_edge(mesh);
 
         let tet = &mut mesh.tets[id1];
         tet.vertices = [v1, v0, v2, v4];
-        tet.opp_tets[0] = TetWalker::new(adj1b.id(), adj1b.to_nfe().edge);
-        tet.opp_tets[1] = TetWalker::new(adj2b.id(), adj2b.to_pfe().edge);
-        tet.opp_tets[2] = TetWalker::new(adj0b.id(), adj0b.edge);
+        tet.opp_tets[0] = TetWalker::new(adj_b[1].id(), adj_b[1].to_nfe().edge);
+        tet.opp_tets[1] = TetWalker::new(adj_b[2].id(), adj_b[2].to_pfe().edge);
+        tet.opp_tets[2] = TetWalker::new(adj_b[0].id(), adj_b[0].edge);
         tet.opp_tets[3] = TetWalker::new(id0, 3);
+        mesh.tets[id1].edges[0] = adj_b[1].to_nfe().undir_edge(mesh);
+        mesh.tets[id1].edges[1] = mesh.tets[id0].edges[1];
+        mesh.tets[id1].edges[2] = mesh.tets[id0].edges[5];
+        mesh.tets[id1].edges[3] = adj_b[2].to_nfe().undir_edge(mesh);
+        mesh.tets[id1].edges[4] = adj_b[0].to_nfe().undir_edge(mesh);
+        mesh.tets[id1].edges[5] = mesh.tets[id0].edges[2];
 
+        mesh.edges.remove(other2.undir_edge(mesh));
         mesh.tets.remove(other2.id());
 
         [TetWalker::new(id0, 10), TetWalker::new(id1, 10)]
@@ -771,10 +806,11 @@ impl TetWalker {
 }
 
 /// A manifold tetrahedralization.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TetMesh<V, T> {
     vertices: IdMap<VertexId, Vertex<V>>,
     ghost_flags: Cell<VertexFlags>,
+    edges: IdMap<UndirEdgeId, UndirEdge>,
     tets: IdMap<TetId, Tet<T>>,
     default_tet: fn() -> T,
 }
@@ -813,6 +849,7 @@ impl<V, T> TetMesh<V, T> {
         let mut tets = Self {
             vertices: IdMap::default(),
             ghost_flags: Cell::new(VertexFlags::empty()),
+            edges: IdMap::default(),
             tets: IdMap::default(),
             default_tet,
         };
@@ -834,12 +871,36 @@ impl<V, T> TetMesh<V, T> {
             Self::GHOST,
         ];
 
+        let edges = [
+            [vi[0], vi[1]],
+            [vi[0], vi[2]],
+            [vi[0], vi[3]],
+            [vi[1], vi[2]],
+            [vi[1], vi[3]],
+            [vi[2], vi[3]],
+            [vi[0], vi[4]],
+            [vi[1], vi[4]],
+            [vi[2], vi[4]],
+            [vi[3], vi[4]],
+        ];
+
+        let ei = tets.edges.extend_values(edges.iter().map(|vs| UndirEdge::new(*vs)))
+            .collect::<Vec<_>>();
+
         let vertices_arr = [
             [vi[0], vi[1], vi[2], vi[3]],
             [vi[1], vi[2], vi[3], vi[4]],
             [vi[0], vi[3], vi[2], vi[4]],
             [vi[3], vi[0], vi[1], vi[4]],
             [vi[2], vi[1], vi[0], vi[4]],
+        ];
+
+        let edges_arr = [
+            [ei[5], ei[0], ei[3], ei[2], ei[4], ei[1]],
+            [ei[9], ei[3], ei[5], ei[7], ei[8], ei[4]],
+            [ei[8], ei[2], ei[5], ei[6], ei[9], ei[1]],
+            [ei[7], ei[2], ei[0], ei[9], ei[6], ei[4]],
+            [ei[6], ei[3], ei[0], ei[8], ei[7], ei[1]],
         ];
 
         let opps_arr = [
@@ -855,7 +916,9 @@ impl<V, T> TetMesh<V, T> {
                 vertices_arr
                     .iter()
                     .zip(opps_arr.iter())
-                    .map(|(vertices, opp_tets)| Tet::new(*vertices, *opp_tets, default_tet())),
+                    .zip(edges_arr.iter())
+                    .map(|((vertices, opp_tets), edges)| Tet::new(*vertices, *opp_tets,
+                        *edges, default_tet())),
             )
             .for_each(|_| {});
 
@@ -869,6 +932,16 @@ impl<V, T> TetMesh<V, T> {
             &self.ghost_flags
         } else {
             &self[vertex].flags
+        }
+    }
+
+    /// Gets a mutable reference to the flags of the vertex.
+    /// If the ghost vertex is passed, this gets the ghost flags.
+    fn vertex_flags_mut(&mut self, vertex: VertexId) -> &mut Cell<VertexFlags> {
+        if vertex == Self::GHOST {
+            &mut self.ghost_flags
+        } else {
+            &mut self.vertices[vertex].flags
         }
     }
 
@@ -1061,9 +1134,18 @@ impl<V, T> TetMesh<V, T> {
         // Mark boundary
         for walker in &*boundary {
             self.tets[walker.id()].set_flags(TetFlags::BOUNDARY);
+            self.edges[walker.undir_edge(self)].set_flags(UndirEdgeFlags::BOUNDARY);
+            self.edges[walker.to_nfe().undir_edge(self)].set_flags(UndirEdgeFlags::BOUNDARY);
+            self.edges[walker.to_pfe().undir_edge(self)].set_flags(UndirEdgeFlags::BOUNDARY);
         }
         // Removed unmarked enclosure
         for id in enclosure {
+            for edge in &self.tets[*id].edges {
+                if self.edges.get(*edge).map(|e| !e.flags.get().intersects(UndirEdgeFlags::BOUNDARY)).unwrap_or(false) {
+                    self.edges.remove(*edge);
+                }
+            }
+
             if !self.tets[*id].flags.get().intersects(TetFlags::BOUNDARY) {
                 self.tets.remove(*id);
             }
@@ -1094,6 +1176,9 @@ impl<V, T> TetMesh<V, T> {
         for walker in &*boundary {
             // Also unmark boundary and tet duplication flags
             self.tets[walker.id()].clear_flags(TetFlags::BOUNDARY | TetFlags::NEEDS_DUPLICATION);
+            self.edges[walker.undir_edge(self)].clear_flags(UndirEdgeFlags::BOUNDARY);
+            self.edges[walker.to_nfe().undir_edge(self)].clear_flags(UndirEdgeFlags::BOUNDARY);
+            self.edges[walker.to_pfe().undir_edge(self)].clear_flags(UndirEdgeFlags::BOUNDARY);
 
             // Don't forget the new vertex!
             self.tets[walker.id()].vertices[walker.edge as usize % 4] = vertex;
@@ -1130,6 +1215,31 @@ impl<V, T> TetMesh<V, T> {
                 2 => adj.to_pfe(),
                 _ => unreachable!(),
             };
+        }
+
+        // Add edges.
+        for walker in &*boundary {
+            for perm in &[Permutation::_0312, Permutation::_1320, Permutation::_2301] {
+                let walker = walker.to_perm(*perm);
+                let source = walker.first(self);
+                if !self.vertex_flags(source).get().intersects(VertexFlags::EDGE_ADDED) {
+                    *self.vertex_flags_mut(source).get_mut() |= VertexFlags::EDGE_ADDED;
+
+                    let edge = self.edges.insert(UndirEdge::new([source, vertex]));
+                    let mut iter = walker;
+                    while {
+                        self.tets[iter.id()].edges[iter.undir_edge_index()] = edge;
+                        iter = iter.to_twin_edge().to_adj(self);
+                        iter != walker
+                    } {}
+                }
+            }
+        }
+
+        for walker in &*boundary {
+            *self.vertex_flags_mut(walker.first(self)).get_mut() &= !VertexFlags::EDGE_ADDED;
+            *self.vertex_flags_mut(walker.to_nfe().first(self)).get_mut() &= !VertexFlags::EDGE_ADDED;
+            *self.vertex_flags_mut(walker.to_pfe().first(self)).get_mut() &= !VertexFlags::EDGE_ADDED;
         }
     }
 
@@ -1551,6 +1661,66 @@ mod tests {
     sorted_fn!(sorted_3, 3);
     even_sort_fn!(even_sort_3, 3);
     even_sort_fn!(even_sort_4, 4);
+    
+    /// Assert all the invariants of this tet mesh.
+    #[cfg(test)]
+    #[track_caller]
+    fn assert_integrity<V, T>(mesh: &TetMesh<V, T>) {
+        // Vertex invariants
+        for (id, vertex) in mesh.vertices.iter() {
+            assert!(vertex.tet.id().is_valid(), "Vertex {} has an invalid tet walker", id);
+            assert_eq!(vertex.tet.first(mesh), id, "Tet walker ({}, {}) of vertex {} does not start with the vertex.",
+                vertex.tet.id(), vertex.tet.edge, id);
+        }
+
+        // Edge invariants
+        for (id, edge) in mesh.edges.iter() {
+            assert_ne!(edge.vertices[0], edge.vertices[1], "Edge {} has equal vertices.", id);
+        }
+        let edge_set = mesh.edges.values()
+            .map(|edge| {
+                let mut vs = edge.vertices;
+                vs.sort();
+                vs
+            }).collect::<FnvHashSet<_>>();
+        assert_eq!(mesh.edges.len(), edge_set.len(), "There are duplicate edges.");
+
+        let mut edge_ids = mesh.edges.keys().collect::<FnvHashSet<_>>();
+        for tet in mesh.tets.values() {
+            for id in &tet.edges {
+                edge_ids.remove(id);
+            }
+        }
+        if !edge_ids.is_empty() {
+            panic!("Edge {} does not belong to a tet.", edge_ids.iter().next().unwrap());
+        }
+
+        // Tet invariants
+        for (id, tet) in mesh.tets.iter() {
+            assert_eq!(tet.vertices().len(), tet.vertices().iter().collect::<FnvHashSet<_>>().len(),
+                "Tet {} does not have unique vertices.", id);
+
+            for i in 0..12 {
+                let walker = TetWalker::new(id, i);
+                let vi = walker.tet(mesh);
+                let mut vs = vi;
+                vs.swap(0, 1);
+                vs[3] = tet.opp_tets[i as usize % 4].fourth(mesh);
+                assert_eq!(walker.to_adj(mesh).tet(mesh), vs, 
+                    "Tet walker ({}, {}) (vertices {} {} {} {}) does not point to the adjacent tet the right way",
+                    walker.id(), walker.edge, vi[0], vi[1], vi[2], vi[3]);
+                
+                assert_eq!(walker.to_adj(mesh).to_adj(mesh).tet(mesh), vi,
+                    "Adjacent tet walker ({}, {}) of tet walker ({}, {}) (vertices {} {} {} {}) does not point back to the tet walker.",
+                    walker.to_adj(mesh).id(), walker.to_adj(mesh).edge, walker.id(), walker.edge, vi[0], vi[1], vi[2], vi[3]);
+
+                let mut edge_vs = mesh.edges[walker.undir_edge(mesh)].vertices;
+                vs[..2].sort();
+                edge_vs.sort();
+                assert_eq!(vs[..2], edge_vs, "Tet walker ({}, {}) does not point to the right edge.", walker.id(), walker.edge);
+            }
+        }
+    }
 
     fn v(n: IdType) -> VertexId {
         VertexId(n)
@@ -1757,37 +1927,7 @@ mod tests {
             assert_eq!(walker.fourth(&mesh), v(4));
         }
 
-        for tet in 0..8 {
-            for i in 0..12 {
-                let walker = TetWalker::new(t(tet), i);
-                let mut vertices = walker.tet(&mesh);
-
-                if !vertices[..3].contains(&v(0)) {
-                    vertices.swap(0, 1);
-
-                    if vertices[3] == v(4) {
-                        // Internal to external link
-                        vertices[3] = v(0);
-                    } else if vertices[3] == v(0) {
-                        // External to internal link
-                        vertices[3] = v(4);
-                    } else {
-                        // Internal link
-                        vertices[3] = v((TetMesh::<(), ()>::GHOST.0 as u64 + 10
-                            - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
-                            as IdType);
-                    }
-                    assert_eq!(
-                        walker.to_adj(&mesh).tet(&mesh),
-                        vertices,
-                        "Flipping {:?}, expected {:?}, got {:?}",
-                        walker.tet(&mesh),
-                        vertices,
-                        walker.to_adj(&mesh).tet(&mesh)
-                    );
-                }
-            }
-        }
+        assert_integrity(&mesh);
     }
 
     #[test]
@@ -1807,44 +1947,7 @@ mod tests {
             .opp_edge(&mesh)
             .contains(&TetMesh::<(), ()>::GHOST));
 
-        for tet in 0..9 {
-            for i in 0..12 {
-                let walker = TetWalker::new(t(tet), i);
-                let mut vertices = walker.tet(&mesh);
-
-                // Resultant tet or opposite resultant tet
-                if vertices[3] == v(0)
-                    || (vertices.contains(&v(4)) && vertices.contains(&TetMesh::<(), ()>::GHOST))
-                {
-                    vertices.swap(0, 1);
-
-                    if vertices[3] == v(4) || vertices[3] == TetMesh::<(), ()>::GHOST {
-                        // Internal to external link
-                        vertices[3] = v(0);
-                    } else if vertices[3] == v(0) {
-                        // External to internal link
-                        vertices[3] = if vertices[..3].contains(&v(4)) {
-                            TetMesh::<(), ()>::GHOST
-                        } else {
-                            v(4)
-                        };
-                    } else {
-                        // Internal link
-                        vertices[3] = v((TetMesh::<(), ()>::GHOST.0 as u64 + 10
-                            - vertices.iter().map(|v| v.0 as u64).sum::<u64>())
-                            as IdType);
-                    }
-                    assert_eq!(
-                        walker.to_adj(&mesh).tet(&mesh),
-                        vertices,
-                        "Flipping {:?}, expected {:?}, got {:?}",
-                        walker.tet(&mesh),
-                        vertices,
-                        walker.to_adj(&mesh).tet(&mesh)
-                    );
-                }
-            }
-        }
+        assert_integrity(&mesh);
     }
 
     #[test]
@@ -1868,48 +1971,7 @@ mod tests {
         );
         assert_eq!(walkers[0].fourth(&mesh), walkers[1].fourth(&mesh));
 
-        for tet in mesh.tets.keys() {
-            for i in 0..12 {
-                let walker = TetWalker::new(tet, i);
-                let mut vertices = walker.tet(&mesh);
-
-                // Resultant tet or opposite resultant tet
-                if vertices[3] == v(0)
-                    || (vertices.contains(&v(1))
-                        && vertices.contains(&v(2))
-                        && vertices.contains(&v(3)))
-                {
-                    vertices.swap(0, 1);
-
-                    if vertices[3] == v(1) || vertices[3] == v(2) || vertices[3] == v(3) {
-                        // Internal to external link
-                        vertices[3] = v(0);
-                    } else if vertices[3] == v(0) {
-                        // External to internal link
-                        vertices[3] = v(6 - vertices[..3]
-                            .iter()
-                            .map(|v| v.0)
-                            .filter(|n| *n == 1 || *n == 2 || *n == 3)
-                            .sum::<u32>());
-                    } else {
-                        // Internal link
-                        vertices[3] = if vertices[3] == v(4) {
-                            TetMesh::<(), ()>::GHOST
-                        } else {
-                            v(4)
-                        }
-                    }
-                    assert_eq!(
-                        walker.to_adj(&mesh).tet(&mesh),
-                        vertices,
-                        "Flipping {:?}, expected {:?}, got {:?}",
-                        walker.tet(&mesh),
-                        vertices,
-                        walker.to_adj(&mesh).tet(&mesh)
-                    );
-                }
-            }
-        }
+        assert_integrity(&mesh);
     }
 
     #[test]
@@ -2048,6 +2110,8 @@ mod tests {
                 }
             }
         }
+
+        assert_integrity(&mesh);
     }
 
     #[test]
@@ -2112,6 +2176,8 @@ mod tests {
                 }
             }
         }
+
+        assert_integrity(&mesh);
     }
 
     #[test]
