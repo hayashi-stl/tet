@@ -1,10 +1,17 @@
-use crate::{Pt3, VertexId, util::{CircularListIter, MapWith}};
+mod intersect;
+
+use crate::{Pt1, Pt3, Vec1, Vec3, VertexId, util::{CircularListIter, MapWith}};
 use crate::id_map::{self, IdMap};
 
+use float_ord::FloatOrd;
 use fnv::{FnvHashMap, FnvHashSet};
-use std::{collections::hash_map::Entry, fmt::Debug, iter, ops::Index};
+use iter::Map;
+use nalgebra::Unit;
+use ncollide3d::partitioning::{BVH, BVT};
+use std::{cell::Cell, collections::hash_map::Entry, fmt::Debug, iter, ops::Index};
 use std::hash::Hash;
-use std::fmt::Display;
+use std::fmt::{Display, Formatter, self};
+use std::error::Error;
 
 crate::id! {
     /// A PLC edge id
@@ -154,7 +161,8 @@ impl FaceRing {
         }
     }
 
-    fn vertices<'a, V, E, F>(&self, plc: &'a Plc<V, E, F>) -> FaceRingVertices<'a, V, E, F> {
+    /// Iterate over the vertices of this face ring.
+    pub fn vertices<'a, V, E, F>(&self, plc: &'a Plc<V, E, F>) -> FaceRingVertices<'a, V, E, F> {
         match self.element {
             RingElement::FaceEdge(fe) =>
                 FaceRingVertices::Multiple(
@@ -164,6 +172,18 @@ impl FaceRing {
             RingElement::Vertex(v) => FaceRingVertices::Single(Some((v, &plc.vertices[v])))
         }
     }
+
+    /// Iterate over the edges of this face ring.
+    pub fn edges<'a, V, E, F>(&self, plc: &'a Plc<V, E, F>) -> FaceRingEdges<'a, V, E, F> {
+        match self.element {
+            RingElement::FaceEdge(fe) =>
+                FaceRingEdges::Multiple(
+                    CircularListIter::new(plc, fe, |plc, fe| &plc.face_edges[fe], |plc, fe| plc.face_edges[fe].next)
+                ),
+
+            RingElement::Vertex(v) => FaceRingEdges::Single
+        }
+    }
 }
 
 /// A PLC face.
@@ -171,6 +191,8 @@ impl FaceRing {
 pub struct Face<F> {
     /// A face ring that has this as its face
     ring: FaceRingId,
+    /// The plane the face lies on in (point, normal) form.
+    plane: (Pt3, Unit<Vec3>),
     value: F,
 }
 
@@ -178,6 +200,7 @@ impl<F> Face<F> {
     fn new(value: F) -> Self {
         Self {
             ring: FaceRingId::invalid(),
+            plane: (Pt1::new(f64::NAN).xxx(), Unit::new_unchecked(Vec3::new(1.0, 0.0, 0.0))),
             value,
         }
     }
@@ -190,6 +213,11 @@ impl<F> Face<F> {
     /// Iterates over the rings of this face.
     pub fn rings<'a, V, E>(&self, plc: &'a Plc<V, E, F>) -> FaceRings<'a, V, E, F> {
         CircularListIter::new(plc, self.ring, |plc, id| &plc.rings[id], |plc, id| plc.rings[id].next)
+    }
+
+    /// Iterates over the vertices of this face, one ring at a time.
+    pub fn vertices<'a, V, E>(&self, plc: &'a Plc<V, E, F>) -> FaceVerticesByRing<'a, V, E, F> {
+        FaceVerticesByRing(self.rings(plc))
     }
 }
 
@@ -437,10 +465,84 @@ impl<V, E, F> Plc<V, E, F> {
         self.rings[prev_ring].next = first_ring;
         self.rings[first_ring].prev = prev_ring;
 
+        self.calc_face_plane(id);
         id
     }
 
+    fn calc_face_plane(&mut self, face: FaceId) {
+        let face_ = &self.faces[face];
+
+        let points = face_.rings(self).flat_map(|(_, ring)| ring.vertices(self))
+            .map(|(_, vertex)| vertex.position()).collect::<Vec<_>>();
+
+        let center: Pt3 = (points.iter().map(|p| p.coords).sum::<Vec3>() / points.len() as f64).into();
+        let normal = face_.rings(self).flat_map(|(_, ring)| ring.edges(self))
+            .map(|(_, edge)| {
+                let vs = edge.vertices();
+                (self[vs[0]].position() - center).cross(&(self[vs[1]].position() - center))
+            }).sum::<Vec3>();
+
+        self.faces[face].plane = (center, Unit::new_normalize(normal))
+    }
+
+    /// Check that this is a valid PLC.
+    /// That means all faces have a ring with at least 3 vertices,
+    /// the vertices of each face are coplanar,
+    /// and no two elements intersect each other without sharing a vertex.
     pub fn validate(&self, distance_tolerance: f64) -> Result<(), ValidateError<V, E, F>> {
+        let mut degenerate = vec![];
+        for (id, face) in self.faces() {
+            if !face.rings(self).any(|(_, ring)| ring.vertices(self).count() >= 3) {
+                degenerate.push(id);
+            }
+        }
+        
+        if !degenerate.is_empty() {
+            Err(ValidateError::new(self, ValidateReason::DegenerateFace(degenerate), distance_tolerance))?;
+        }
+
+        let mut twisted = vec![];
+        for (id, face) in self.faces() {
+            let points = face.rings(self).flat_map(|(_, ring)| ring.vertices(self))
+                .map(|(id, vertex)| (id, vertex.position())).collect::<Vec<_>>();
+
+            let mut fails = vec![];
+            for (vertex, point) in points {
+                // Half the tolerance because the plane is in the middle.
+                // Intersection tests should still work near the edge of the coplanarity tolerance.
+                let dist = (point - face.plane.0).dot(&face.plane.1);
+                if dist >= distance_tolerance / 2.0 {
+                    fails.push((vertex, dist));
+                    break;
+                }
+            }
+            if !fails.is_empty() {
+                twisted.push((id, fails));
+            }
+        }
+
+        if !twisted.is_empty() {
+            Err(ValidateError::new(self, ValidateReason::TwistedFace(twisted), distance_tolerance))?;
+        }
+
+        // Intersection time.
+        let bvt = BVT::new_balanced(
+            self.vertex_ids().map(|v| intersect::vertex_bound(self, v, distance_tolerance)).chain(
+                self.edge_ids().map(|e| intersect::edge_bound(self, e, distance_tolerance))
+            ).chain(self.face_ids().map(|f| intersect::face_bound(self, f, distance_tolerance))).collect()
+        );
+
+        let mut visitor = intersect::IntersectionTest {
+            plc: self,
+            tolerance: distance_tolerance,
+            intersections: vec![],
+        };
+
+        bvt.visit_bvtt(&bvt, &mut visitor);
+        if !visitor.intersections.is_empty() {
+            Err(ValidateError::new(self, ValidateReason::Intersects(visitor.intersections), distance_tolerance))?;
+        }
+
         Ok(())
     }
 
@@ -479,23 +581,122 @@ impl<V, E, F> Plc<V, E, F> {
 }
 
 /// An error returned from the validate function.
+#[derive(Clone)]
 pub struct ValidateError<'a, V, E, F> {
     /// Needed to display error
     plc: &'a Plc<V, E, F>,
-    error: ValidateReason,
+    reason: ValidateReason,
+    tolerance: f64,
 }
 
+impl<'a, V, E, F> ValidateError<'a, V, E, F> {
+    fn new(plc: &'a Plc<V, E, F>, reason: ValidateReason, tolerance: f64) -> Self {
+        Self { plc, reason, tolerance }
+    }
+
+    /// The reason why validation failed
+    pub fn reason(&self) -> &ValidateReason {
+        &self.reason
+    }
+
+    pub fn fmt_vertex(&self, vertex: VertexId, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "vertex {}", vertex)
+    }
+
+    pub fn fmt_edge(&self, edge: EdgeId, f: &mut Formatter<'_>) -> fmt::Result {
+        let vs = self.plc[edge].vertices();
+        write!(f, "edge {} ({}-{})", edge, vs[0], vs[1])
+    }
+
+    pub fn fmt_face(&self, face: FaceId, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "face {} [", face)?;
+        let mut passed_first = false;
+
+        for mut ring in self.plc[face].vertices(self.plc) {
+            if passed_first {
+                write!(f, ", ")?;
+            } else {
+                passed_first = true;
+            }
+
+            let first = ring.next().unwrap().0;
+            write!(f, "{}", first)?;
+            for vertex in ring.into_iter().map(|(v, _)| v).chain(iter::once(first)) {
+                write!(f, "-{}", vertex)?;
+            }
+        }
+        write!(f, "]")
+    }
+
+    pub fn fmt_element(&self, element: Element, f: &mut Formatter<'_>) -> fmt::Result {
+        match element {
+            Element::Vertex(vertex) => self.fmt_vertex(vertex, f),
+            Element::Edge(edge) => self.fmt_edge(edge, f),
+            Element::Face(face) => self.fmt_face(face, f),
+        }
+    }
+}
+
+impl<'a, V, E, F> Display for ValidateError<'a, V, E, F> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match &self.reason {
+            ValidateReason::DegenerateFace(faces) => {
+                writeln!(f, "The following faces have no ring with at least 3 vertices:")?;
+                for face in faces {
+                    self.fmt_face(*face, f)?;
+                    writeln!(f)?
+                }
+            },
+
+            ValidateReason::TwistedFace(faces) => {
+                writeln!(f, "The following faces are twisted (not coplanar) (tolerance {}):", self.tolerance / 2.0)?;
+                for (face, fails) in faces {
+                    self.fmt_face(*face, f)?;
+                    write!(f, " (failing vertices (distances from plane): {} ({})", fails[0].0, fails[0].1)?;
+                    for (vertex, dist) in fails.into_iter().skip(1) {
+                        write!(f, ", {} ({})", vertex, dist)?;
+                    }
+                    writeln!(f, ")")?;
+                }
+            }
+
+            ValidateReason::Intersects(intersections) => {
+                writeln!(f, "The following elements intersect or are too close together (tolerance {}):", self.tolerance)?;
+                for (e0, e1, dist) in intersections {
+                    self.fmt_element(*e0, f)?;
+                    write!(f, " and ")?;
+                    self.fmt_element(*e1, f)?;
+                    write!(f, " (distance {})", dist)?;
+                    writeln!(f)?
+                }
+            }
+        };
+
+        Ok(())
+    }
+}
+
+impl<'a, V, E, F> Debug for ValidateError<'a, V, E, F> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(&self, f)
+    }
+}
+
+impl<'a, V, E, F> Error for ValidateError<'a, V, E, F> {}
+
 /// The error that actually happened.
+#[derive(Clone, Debug, PartialEq)]
 pub enum ValidateReason {
     /// Some faces have less than 3 vertices.
     DegenerateFace(Vec<FaceId>),
     /// Some faces are not coplanar enough.
-    TwistedFace(Vec<FaceId>),
+    TwistedFace(Vec<(FaceId, Vec<(VertexId, f64)>)>),
     /// Some elements are too close to each other.
-    TooClose(Vec<(Element, Element, f64)>),
+    Intersects(Vec<(Element, Element, f64)>),
 }
 
 /// A vertex, edge, or face.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Element {
     Vertex(VertexId),
     Edge(EdgeId),
@@ -505,6 +706,18 @@ pub enum Element {
 /// Iterator over the rings of a face
 pub type FaceRings<'a, V, E, F> = CircularListIter<&'a Plc<V, E, F>, FaceRingId, fn(&'a Plc<V, E, F>, FaceRingId) -> &'a FaceRing,
     fn(&'a Plc<V, E, F>, FaceRingId) -> FaceRingId>;
+
+/// Iterator over the vertices of a face, one ring at a time
+pub struct FaceVerticesByRing<'a, V, E, F>(FaceRings<'a, V, E, F>);
+
+impl<'a, V, E, F> Iterator for FaceVerticesByRing<'a, V, E, F> {
+    type Item = FaceRingVertices<'a, V, E, F>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let plc = self.0.common;
+        self.0.next().map(|(_, ring)| ring.vertices(plc))
+    }
+}
 
 /// Iterator over the vertices of a face ring
 pub enum FaceRingVertices<'a, V, E, F> {
@@ -526,6 +739,31 @@ impl<'a, V, E, F> Iterator for FaceRingVertices<'a, V, E, F> {
                 iter.next().map(|(_, fe)| {
                     let vertex = plc.edges[fe.edge].vertices()[0];
                     (vertex, &plc.vertices[vertex])
+                })
+            }
+        }
+    }
+}
+
+/// Iterator over the edges of a face ring
+pub enum FaceRingEdges<'a, V, E, F> {
+    Single,
+    Multiple(
+        CircularListIter<&'a Plc<V, E, F>, FaceEdgeId, fn(&'a Plc<V, E, F>, FaceEdgeId) -> &'a FaceEdge, fn(&'a Plc<V, E, F>, FaceEdgeId) -> FaceEdgeId>,
+    )
+}
+
+impl<'a, V, E, F> Iterator for FaceRingEdges<'a, V, E, F> {
+    type Item = (EdgeId, &'a Edge<E>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Single => None,
+
+            Self::Multiple(iter) => {
+                let plc = iter.common;
+                iter.next().map(|(_, fe)| {
+                    (fe.edge, &plc.edges[fe.edge])
                 })
             }
         }
@@ -816,6 +1054,16 @@ mod tests {
         plc
     }
 
+    fn plc_from_pos_vef(points: Vec<Pt3>, edges: Vec<[u32; 2]>, faces: Vec<Vec<Vec<u32>>>) -> Plc<(), (), ()> {
+        let mut plc = Plc::new(|| (), || (), || ());
+        points.into_iter().map(|point| plc.add_vertex(point, ())).for_each(|_| {});
+
+        e_ids(edges).into_iter().map(|vertices| plc.add_edge(vertices, ())).for_each(|_| {});
+        f_ids(faces).into_iter().map(|face| plc.add_face(face, ())).for_each(|_| {});
+
+        plc
+    }
+
     #[test]
     fn test_empty() {
         let plc = Plc::new(|| (), || (), || ());
@@ -965,5 +1213,62 @@ mod tests {
     fn test_load_obj() {
         let plc = Plc::load_obj("assets/monkey.obj", || (), || (), || ()).unwrap();
         assert_integrity(&plc);
+    }
+
+    #[test]
+    fn test_invalid_degenerate_face() {
+        let plc = plc_from_pos_vef(vec![
+            Pt3::new(0.0, 0.0, 0.0)
+        ], vec![], vec![vec![vec![0]]]);
+
+        assert_eq!(plc.validate(0.1).unwrap_err().reason(), &ValidateReason::DegenerateFace(vec![FaceId(0)]));
+    }
+
+    #[test]
+    fn test_invalid_twisted() {
+        let plc = plc_from_pos_vef(vec![
+            Pt3::new(0.0, 0.0, 0.1),
+            Pt3::new(0.0, 1.0, 0.0),
+            Pt3::new(1.0, 1.0, 0.1),
+            Pt3::new(1.0, 0.0, 0.0),
+        ], vec![], vec![vec![vec![0, 1, 2, 3]]]);
+
+        // Note: Coplanarity tolerance is half distance tolerance.
+        plc.validate(0.06).unwrap_err();
+    }
+
+    #[test]
+    fn test_invalid_intersects() {
+        let plc = plc_from_pos_vef(vec![
+            Pt3::new(0.0, 0.0, 0.0),
+            Pt3::new(0.0, 0.0, 3.0),
+            Pt3::new(0.0, 3.0, 3.0),
+            Pt3::new(0.0, 3.0, 0.0),
+            Pt3::new(0.0, 1.0, 1.0),
+            Pt3::new(0.0, 1.0, 2.0),
+            Pt3::new(0.0, 2.0, 2.0),
+            Pt3::new(0.0, 2.0, 1.0),
+            Pt3::new(0.0, 0.5, 1.0),
+        ], vec![], vec![vec![vec![0, 1, 2, 3], vec![7, 6, 5, 4]]]);
+
+        assert_eq!(plc.validate(0.1).unwrap_err().reason(),
+            &ValidateReason::Intersects(vec![(Element::Vertex(VertexId(8)), Element::Face(FaceId(0)), 0.0)]));
+    }
+
+    #[test]
+    fn test_valid_isolated_vertex() {
+        let plc = plc_from_pos_vef(vec![
+            Pt3::new(0.0, 0.0, 0.0),
+            Pt3::new(0.0, 0.0, 3.0),
+            Pt3::new(0.0, 3.0, 3.0),
+            Pt3::new(0.0, 3.0, 0.0),
+            Pt3::new(0.0, 1.0, 1.0),
+            Pt3::new(0.0, 1.0, 2.0),
+            Pt3::new(0.0, 2.0, 2.0),
+            Pt3::new(0.0, 2.0, 1.0),
+            Pt3::new(0.0, 0.5, 1.0),
+        ], vec![], vec![vec![vec![0, 1, 2, 3], vec![7, 6, 5, 4], vec![8]]]);
+
+        assert!(plc.validate(0.1).is_ok());
     }
 }

@@ -6,10 +6,11 @@ pub mod plc;
 pub use crate::tet::{TetMesh, TetWalker};
 pub use crate::plc::Plc;
 
-use nalgebra::{Point1, Point3, Vector3};
+use nalgebra::{Point1, Point3, Vector1, Vector3};
 
 type Pt1 = Point1<f64>;
 type Pt3 = Point3<f64>;
+type Vec1 = Vector1<f64>;
 type Vec3 = Vector3<f64>;
 
 #[macro_export]
