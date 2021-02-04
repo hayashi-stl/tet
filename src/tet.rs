@@ -1,12 +1,20 @@
-use std::{cell::Cell, collections::VecDeque, hash::{Hash, Hasher}, path::Path};
-use std::ops::Index;
-use std::iter::{self, Map};
-use float_ord::FloatOrd;
 use bitflags::bitflags;
+use float_ord::FloatOrd;
+use std::iter::{self, Map};
+use std::ops::Index;
+use std::{
+    cell::Cell,
+    collections::VecDeque,
+    hash::{Hash, Hasher},
+    path::Path,
+};
 
-use crate::{Pt1, id_map::{self, IdMap, IdType}};
-use crate::{Pt3, VertexId, Vec3};
 use crate::util;
+use crate::{
+    id_map::{self, IdMap, IdType},
+    Pt1,
+};
+use crate::{Pt3, Vec3, VertexId};
 use fnv::{FnvHashMap, FnvHashSet};
 use simplicity as sim;
 
@@ -427,10 +435,18 @@ impl TetWalker {
 
         // Just in case of dangling vertex-tet reference
         let vs = mesh.tets[id0].vertices();
-        mesh.vertices.get_mut(vs[0]).map(|v| v.tet = TetWalker::new(id2, 3) );
-        mesh.vertices.get_mut(vs[1]).map(|v| v.tet = TetWalker::new(id3, 2) );
-        mesh.vertices.get_mut(vs[2]).map(|v| v.tet = TetWalker::new(id0, 1) );
-        mesh.vertices.get_mut(vs[3]).map(|v| v.tet = TetWalker::new(id1, 0) );
+        mesh.vertices
+            .get_mut(vs[0])
+            .map(|v| v.tet = TetWalker::new(id2, 3));
+        mesh.vertices
+            .get_mut(vs[1])
+            .map(|v| v.tet = TetWalker::new(id3, 2));
+        mesh.vertices
+            .get_mut(vs[2])
+            .map(|v| v.tet = TetWalker::new(id0, 1));
+        mesh.vertices
+            .get_mut(vs[3])
+            .map(|v| v.tet = TetWalker::new(id1, 0));
 
         // Update tets
         // Note that adjacent tets need to change their opposite tet ids,
@@ -532,11 +548,21 @@ impl TetWalker {
         let ([v1, v0, v2, v3], v4) = (self.tet(&mesh), other.fourth(&mesh));
 
         // Just in case of dangling vertex-tet reference
-        mesh.vertices.get_mut(v0).map(|v| v.tet = TetWalker::new(id0, 3) );
-        mesh.vertices.get_mut(v1).map(|v| v.tet = TetWalker::new(id1, 3) );
-        mesh.vertices.get_mut(v2).map(|v| v.tet = TetWalker::new(id2, 3) );
-        mesh.vertices.get_mut(v3).map(|v| v.tet = TetWalker::new(id0, 1) );
-        mesh.vertices.get_mut(v4).map(|v| v.tet = TetWalker::new(id0, 0) );
+        mesh.vertices
+            .get_mut(v0)
+            .map(|v| v.tet = TetWalker::new(id0, 3));
+        mesh.vertices
+            .get_mut(v1)
+            .map(|v| v.tet = TetWalker::new(id1, 3));
+        mesh.vertices
+            .get_mut(v2)
+            .map(|v| v.tet = TetWalker::new(id2, 3));
+        mesh.vertices
+            .get_mut(v3)
+            .map(|v| v.tet = TetWalker::new(id0, 1));
+        mesh.vertices
+            .get_mut(v4)
+            .map(|v| v.tet = TetWalker::new(id0, 0));
 
         let tet = &mut mesh.tets[id0];
         tet.vertices = [v0, v1, v3, v4];
@@ -630,11 +656,21 @@ impl TetWalker {
         let ([v3, v4, v1, v0], v2) = (self.tet(&mesh), other1.fourth(&mesh));
 
         // Just in case of dangling vertex-tet reference
-        mesh.vertices.get_mut(v0).map(|v| v.tet = TetWalker::new(id0, 3) );
-        mesh.vertices.get_mut(v1).map(|v| v.tet = TetWalker::new(id0, 7) );
-        mesh.vertices.get_mut(v2).map(|v| v.tet = TetWalker::new(id0, 11) );
-        mesh.vertices.get_mut(v3).map(|v| v.tet = TetWalker::new(id0, 0) );
-        mesh.vertices.get_mut(v4).map(|v| v.tet = TetWalker::new(id1, 0) );
+        mesh.vertices
+            .get_mut(v0)
+            .map(|v| v.tet = TetWalker::new(id0, 3));
+        mesh.vertices
+            .get_mut(v1)
+            .map(|v| v.tet = TetWalker::new(id0, 7));
+        mesh.vertices
+            .get_mut(v2)
+            .map(|v| v.tet = TetWalker::new(id0, 11));
+        mesh.vertices
+            .get_mut(v3)
+            .map(|v| v.tet = TetWalker::new(id0, 0));
+        mesh.vertices
+            .get_mut(v4)
+            .map(|v| v.tet = TetWalker::new(id1, 0));
 
         let tet = &mut mesh.tets[id0];
         tet.vertices = [v0, v1, v2, v3];
@@ -670,7 +706,12 @@ impl TetWalker {
             TetWalker::new(self.id(), 2),
             TetWalker::new(self.id(), 3),
         ];
-        mesh.tets[self.id()].set_flags(TetFlags::BOUND_IMM_0 | TetFlags::BOUND_IMM_1 | TetFlags::BOUND_IMM_2 | TetFlags::BOUND_IMM_3);
+        mesh.tets[self.id()].set_flags(
+            TetFlags::BOUND_IMM_0
+                | TetFlags::BOUND_IMM_1
+                | TetFlags::BOUND_IMM_2
+                | TetFlags::BOUND_IMM_3,
+        );
 
         let mut boundary = vec![];
         let mut enclosed = vec![self.id()];
@@ -704,7 +745,11 @@ impl TetWalker {
                 .iter()
                 {
                     let twin = walker.to_adj_ae(&mesh);
-                    if mesh.tets[twin.id()].flags.get().intersects(edge_flag(twin.edge)) {
+                    if mesh.tets[twin.id()]
+                        .flags
+                        .get()
+                        .intersects(edge_flag(twin.edge))
+                    {
                         mesh.tets[twin.id()].clear_flags(edge_flag(twin.edge));
                     } else {
                         mesh.tets[walker.id()].set_flags(edge_flag(walker.edge));
@@ -749,12 +794,15 @@ impl<V, T> TetMesh<V, T> {
         V: Clone,
         T: Clone,
     {
-        Self::with_ids([
-            (VertexId(0), vertices[0].0, vertices[0].1.clone()),
-            (VertexId(1), vertices[1].0, vertices[1].1.clone()),
-            (VertexId(2), vertices[2].0, vertices[2].1.clone()),
-            (VertexId(3), vertices[3].0, vertices[3].1.clone()),
-        ], default_tet)
+        Self::with_ids(
+            [
+                (VertexId(0), vertices[0].0, vertices[0].1.clone()),
+                (VertexId(1), vertices[1].0, vertices[1].1.clone()),
+                (VertexId(2), vertices[2].0, vertices[2].1.clone()),
+                (VertexId(3), vertices[3].0, vertices[3].1.clone()),
+            ],
+            default_tet,
+        )
     }
 
     fn with_ids(vertices: [(VertexId, Pt3, V); 4], default_tet: fn() -> T) -> Self
@@ -881,7 +929,10 @@ impl<V, T> TetMesh<V, T> {
     ///
     /// # Safety
     /// The returned iterator needs to drop before calling this function again.
-    unsafe fn walkers_from_vertex_opt<'a>(&'a self, vertex: VertexId) -> WalkersFromVertexOpt<'a, V, T> {
+    unsafe fn walkers_from_vertex_opt<'a>(
+        &'a self,
+        vertex: VertexId,
+    ) -> WalkersFromVertexOpt<'a, V, T> {
         WalkersFromVertexOpt {
             mesh: self,
             visited: vec![],
@@ -899,7 +950,8 @@ impl<V, T> TetMesh<V, T> {
     /// # Safety
     /// The returned iterator needs to drop before calling this function again.
     unsafe fn vertex_tets_opt<'a>(&'a self, vertex: VertexId) -> VertexTetsOpt<'a, V, T> {
-        self.walkers_from_vertex_opt(vertex).map(|walker| walker.id())
+        self.walkers_from_vertex_opt(vertex)
+            .map(|walker| walker.id())
     }
 
     /// Gets the edge target vertices from a vertex.
@@ -942,7 +994,11 @@ impl<V, T> TetMesh<V, T> {
     /// If both vertices are the ghost vertex, this returns 0.
     pub fn vertex_distance2(&self, v0: VertexId, v1: VertexId) -> f64 {
         if v0 == Self::GHOST {
-            if v1 == Self::GHOST { 0.0 } else { f64::INFINITY }
+            if v1 == Self::GHOST {
+                0.0
+            } else {
+                f64::INFINITY
+            }
         } else if v1 == Self::GHOST {
             f64::INFINITY
         } else {
@@ -968,7 +1024,14 @@ impl<V, T> TetMesh<V, T> {
     /// Uses simulation of simplicity to avoid ties.
     /// [v0, v1, v2, v3] must have positive orientation.
     /// Assumes that none of the points equal and that the last point isn't the ghost vertex.
-    pub fn in_sphere(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId, v4: VertexId) -> bool {
+    pub fn in_sphere(
+        &self,
+        v0: VertexId,
+        v1: VertexId,
+        v2: VertexId,
+        v3: VertexId,
+        v4: VertexId,
+    ) -> bool {
         if v0 == Self::GHOST {
             sim::orient_3d(self, Self::idx, v3, v2, v1, v4)
         } else if v1 == Self::GHOST {
@@ -986,7 +1049,14 @@ impl<V, T> TetMesh<V, T> {
     /// The boundary must be manifold.
     /// For now, no vertex can be completely enclosed.
     /// This does not check that negative-volume tets won't be created. Be careful.
-    pub fn flip_in_vertex_unchecked(&mut self, vertex: VertexId, boundary: &mut [TetWalker], enclosure: &[TetId]) where T: Clone {
+    pub fn flip_in_vertex_unchecked(
+        &mut self,
+        vertex: VertexId,
+        boundary: &mut [TetWalker],
+        enclosure: &[TetId],
+    ) where
+        T: Clone,
+    {
         // Delete tets that don't even have a triangle on the boundary
         // Mark boundary
         for walker in &*boundary {
@@ -1001,7 +1071,11 @@ impl<V, T> TetMesh<V, T> {
 
         // Check for tets that need to be duplicated and make necessary clones
         for walker in boundary.iter_mut() {
-            if self.tets[walker.id()].flags.get().intersects(TetFlags::NEEDS_DUPLICATION) {
+            if self.tets[walker.id()]
+                .flags
+                .get()
+                .intersects(TetFlags::NEEDS_DUPLICATION)
+            {
                 let id = self.tets.insert(self[walker.id()].clone());
                 // Do not clear the flag in the clone because it will be cleared later.
                 let adj = walker.to_adj_ae(&self);
@@ -1029,8 +1103,12 @@ impl<V, T> TetMesh<V, T> {
             // Other vertices, just in case their references are now dangling
             let tri = walker.tri(self);
             self.vertices.get_mut(tri[0]).map(|v| v.tet = *walker);
-            self.vertices.get_mut(tri[1]).map(|v| v.tet = walker.to_nfe());
-            self.vertices.get_mut(tri[2]).map(|v| v.tet = walker.to_pfe());
+            self.vertices
+                .get_mut(tri[1])
+                .map(|v| v.tet = walker.to_nfe());
+            self.vertices
+                .get_mut(tri[2])
+                .map(|v| v.tet = walker.to_pfe());
 
             let tri = walker.tri(&self);
             edge_map.insert([tri[0], tri[1]], *walker);
@@ -1058,7 +1136,14 @@ impl<V, T> TetMesh<V, T> {
     /// Create a Delaunay tetrahedralization from vertices. Panics if there are less than 4 vertices
     /// because it takes 4 vertices to make a tet.
     /// `VertexId(i)` is the index to the `i`th vertex returned from the iterator.
-    pub fn delaunay_from_vertices<I: IntoIterator<Item = (Pt3, V)>>(vertices: I, default_tet: fn() -> T) -> Self where V: Clone, T: Clone {
+    pub fn delaunay_from_vertices<I: IntoIterator<Item = (Pt3, V)>>(
+        vertices: I,
+        default_tet: fn() -> T,
+    ) -> Self
+    where
+        V: Clone,
+        T: Clone,
+    {
         let mut vertices = util::hilbert_sort(vertices);
         let mut drain = vertices.drain(0..4);
         let v0 = drain.next().unwrap();
@@ -1070,7 +1155,9 @@ impl<V, T> TetMesh<V, T> {
 
         let mut mesh = Self::with_ids([v0, v1, v2, v3], default_tet);
         // include v3's id to avoid indexing out of bounds
-        let ids = iter::once(v3_id).chain(vertices.iter().map(|v| v.0)).collect::<Vec<_>>();
+        let ids = iter::once(v3_id)
+            .chain(vertices.iter().map(|v| v.0))
+            .collect::<Vec<_>>();
 
         for (i, (id, position, value)) in vertices.into_iter().enumerate() {
             mesh.add_vertex_delaunay_internal(Some(id), position, value, ids[i]);
@@ -1081,18 +1168,42 @@ impl<V, T> TetMesh<V, T> {
 
     /// Add a vertex to keep the Delaunay property, assuming this is a Delaunay tetrahedralization.
     /// Returns the new vertex id.
-    pub fn add_vertex_delaunay(&mut self, position: Pt3, value: V) -> VertexId where T: Clone {
-        self.add_vertex_delaunay_internal(None, position, value, self.vertices.keys().next().unwrap())
+    pub fn add_vertex_delaunay(&mut self, position: Pt3, value: V) -> VertexId
+    where
+        T: Clone,
+    {
+        self.add_vertex_delaunay_internal(
+            None,
+            position,
+            value,
+            self.vertices.keys().next().unwrap(),
+        )
     }
 
-    pub fn add_vertex_delaunay_internal(&mut self, id: Option<VertexId>, position: Pt3, value: V, search_start: VertexId) -> VertexId where T: Clone {
+    pub fn add_vertex_delaunay_internal(
+        &mut self,
+        id: Option<VertexId>,
+        position: Pt3,
+        value: V,
+        search_start: VertexId,
+    ) -> VertexId
+    where
+        T: Clone,
+    {
         let mut closest = search_start;
 
         let id = if let Some(id) = id {
-            self.vertices.insert_with_key(id, Vertex::new(TetWalker::new(TetId::invalid(), 0), position, value));
+            self.vertices.insert_with_key(
+                id,
+                Vertex::new(TetWalker::new(TetId::invalid(), 0), position, value),
+            );
             id
         } else {
-            self.vertices.insert(Vertex::new(TetWalker::new(TetId::invalid(), 0), position, value))
+            self.vertices.insert(Vertex::new(
+                TetWalker::new(TetId::invalid(), 0),
+                position,
+                value,
+            ))
         };
 
         let lucky_tet = self[closest].tet.id();
@@ -1118,18 +1229,22 @@ impl<V, T> TetMesh<V, T> {
             // Find a tet that is no longer Delaunay
             // Safe because there was no call to vertex_tets_opt before
             unsafe {
-                self.vertex_tets_opt(closest).find(|tet| { 
+                self.vertex_tets_opt(closest).find(|tet| {
                     let vs = self[*tet].vertices();
                     self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
                 })
-            }.unwrap_or_else(|| {
+            }
+            .unwrap_or_else(|| {
                 // Rare case because the distance comparisons are not robust
                 // Safe because the previous call's iterator was dropped.
-                let mut checked = unsafe {
-                    self.vertex_tets_opt(closest).collect::<FnvHashSet<_>>()
-                }; // already checked
-                let mut tets = checked.iter().flat_map(|tet| self.adjacent_tets(*tet).to_vec())
-                    .collect::<FnvHashSet<_>>().into_iter().collect::<VecDeque<_>>();
+                let mut checked =
+                    unsafe { self.vertex_tets_opt(closest).collect::<FnvHashSet<_>>() }; // already checked
+                let mut tets = checked
+                    .iter()
+                    .flat_map(|tet| self.adjacent_tets(*tet).to_vec())
+                    .collect::<FnvHashSet<_>>()
+                    .into_iter()
+                    .collect::<VecDeque<_>>();
 
                 while let Some(tet) = tets.pop_front() {
                     if checked.insert(tet) {
@@ -1140,16 +1255,21 @@ impl<V, T> TetMesh<V, T> {
                     }
                 }
 
-                panic!("Expected some tet to stop being Delaunay when inserting vertex {} at {:?}", id, self[id].position())
+                panic!(
+                    "Expected some tet to stop being Delaunay when inserting vertex {} at {:?}",
+                    id,
+                    self[id].position()
+                )
             })
         };
 
         // Find all non-Delaunay tets
-        let (mut boundary, enclosed) = self.walker_from_tet(not_delaunay).boundary_and_enclosed(self,
-            |tet| {
-                let vs = self[tet].vertices();
-                self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
-            });
+        let (mut boundary, enclosed) =
+            self.walker_from_tet(not_delaunay)
+                .boundary_and_enclosed(self, |tet| {
+                    let vs = self[tet].vertices();
+                    self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
+                });
 
         // Add the new vertex
         self.flip_in_vertex_unchecked(id, &mut boundary, &enclosed);
@@ -1159,14 +1279,21 @@ impl<V, T> TetMesh<V, T> {
 
     #[cfg(feature = "obj")]
     pub fn export_debug_obj<P: AsRef<Path>>(&self, path: P) -> Result<(), obj::ObjError> {
-        let solid_tets = || self.tets.values().filter(|t| !t.vertices().contains(&Self::GHOST)).enumerate();
+        let solid_tets = || {
+            self.tets
+                .values()
+                .filter(|t| !t.vertices().contains(&Self::GHOST))
+                .enumerate()
+        };
 
         let obj = obj::ObjData {
-            position: solid_tets().flat_map(|(_, t)| t.vertices().to_vec())
+            position: solid_tets()
+                .flat_map(|(_, t)| t.vertices().to_vec())
                 .map(|v| {
                     let pos = self[v].position;
                     [pos.x as f32, pos.y as f32, pos.z as f32]
-                }).collect(),
+                })
+                .collect(),
             texture: vec![],
             normal: vec![],
 
@@ -1176,16 +1303,23 @@ impl<V, T> TetMesh<V, T> {
                     name: "Tet Group".to_owned(),
                     index: 0,
                     material: None,
-                    polys: solid_tets().flat_map(|(i, _)| vec![
-                        [4 * i + 0, 4 * i + 1, 4 * i + 2],
-                        [4 * i + 3, 4 * i + 2, 4 * i + 1],
-                        [4 * i + 2, 4 * i + 3, 4 * i + 0],
-                        [4 * i + 1, 4 * i + 0, 4 * i + 3],
-                    ]).map(|[a, b, c]| obj::SimplePolygon(vec![
-                        obj::IndexTuple(a, None, None),
-                        obj::IndexTuple(b, None, None),
-                        obj::IndexTuple(c, None, None),
-                    ])).collect::<Vec<_>>()
+                    polys: solid_tets()
+                        .flat_map(|(i, _)| {
+                            vec![
+                                [4 * i + 0, 4 * i + 1, 4 * i + 2],
+                                [4 * i + 3, 4 * i + 2, 4 * i + 1],
+                                [4 * i + 2, 4 * i + 3, 4 * i + 0],
+                                [4 * i + 1, 4 * i + 0, 4 * i + 3],
+                            ]
+                        })
+                        .map(|[a, b, c]| {
+                            obj::SimplePolygon(vec![
+                                obj::IndexTuple(a, None, None),
+                                obj::IndexTuple(b, None, None),
+                                obj::IndexTuple(c, None, None),
+                            ])
+                        })
+                        .collect::<Vec<_>>(),
                 }],
             }],
 
@@ -1235,10 +1369,13 @@ impl<'a, V, T> Iterator for WalkersFromVertex<'a, V, T> {
         // DFS
         while let Some(walker) = self.to_search.pop() {
             if self.visited.insert(walker.id()) {
-                self.to_search.push(walker.to_perm(Permutation::_1032).to_adj(self.mesh));
-                self.to_search.push(walker.to_perm(Permutation::_2013).to_adj(self.mesh));
-                self.to_search.push(walker.to_perm(Permutation::_3021).to_adj(self.mesh));
-                return Some(walker)
+                self.to_search
+                    .push(walker.to_perm(Permutation::_1032).to_adj(self.mesh));
+                self.to_search
+                    .push(walker.to_perm(Permutation::_2013).to_adj(self.mesh));
+                self.to_search
+                    .push(walker.to_perm(Permutation::_3021).to_adj(self.mesh));
+                return Some(walker);
             }
         }
         None
@@ -1265,10 +1402,13 @@ impl<'a, V, T> Iterator for WalkersFromVertexOpt<'a, V, T> {
             if !tet.flags.get().intersects(TetFlags::WALKERS_FROM_VERTEX) {
                 tet.set_flags(TetFlags::WALKERS_FROM_VERTEX);
                 self.visited.push(walker.id());
-                self.to_search.push(walker.to_perm(Permutation::_1032).to_adj(self.mesh));
-                self.to_search.push(walker.to_perm(Permutation::_2013).to_adj(self.mesh));
-                self.to_search.push(walker.to_perm(Permutation::_3021).to_adj(self.mesh));
-                return Some(walker)
+                self.to_search
+                    .push(walker.to_perm(Permutation::_1032).to_adj(self.mesh));
+                self.to_search
+                    .push(walker.to_perm(Permutation::_2013).to_adj(self.mesh));
+                self.to_search
+                    .push(walker.to_perm(Permutation::_3021).to_adj(self.mesh));
+                return Some(walker);
             }
         }
         None
@@ -1446,11 +1586,17 @@ mod tests {
 
     #[track_caller]
     fn assert_tets<V, T, I: IntoIterator<Item = [u32; 4]>>(mesh: &TetMesh<V, T>, tets: I) {
-        let result = mesh.tets.iter().map(|(_, tet)| even_sort_4(tet.vertices())).collect::<FnvHashSet<_>>();
+        let result = mesh
+            .tets
+            .iter()
+            .map(|(_, tet)| even_sort_4(tet.vertices()))
+            .collect::<FnvHashSet<_>>();
         let expect = tets.into_iter().collect::<Vec<_>>();
         assert_eq!(result.len(), expect.len());
-        let expect = expect.into_iter().map(|[v0, v1, v2, v3]|
-            even_sort_4([v(v0), v(v1), v(v2), v(v3)])).collect::<FnvHashSet<_>>();
+        let expect = expect
+            .into_iter()
+            .map(|[v0, v1, v2, v3]| even_sort_4([v(v0), v(v1), v(v2), v(v3)]))
+            .collect::<FnvHashSet<_>>();
         assert_eq!(result, expect);
     }
 
@@ -1462,7 +1608,10 @@ mod tests {
         assert_eq!(mesh[v(1)].position(), Pt3::new(0.0, 0.0, 1.0));
         assert_eq!(mesh[v(2)].position(), Pt3::new(0.0, 1.0, 0.0));
         assert_eq!(mesh[v(3)].position(), Pt3::new(1.0, 0.0, 0.0));
-        assert_eq!(mesh.vertex(TetMesh::<(), ()>::GHOST).map(|v| v.value()), None);
+        assert_eq!(
+            mesh.vertex(TetMesh::<(), ()>::GHOST).map(|v| v.value()),
+            None
+        );
 
         assert_eq!(mesh.num_tets(), 5);
         assert_eq!(even_sort_4(mesh[t(0)].vertices()), [v(0), v(1), v(2), v(3)]);
@@ -1478,7 +1627,10 @@ mod tests {
         assert_eq!(mesh[v(1)].position(), Pt3::new(1.0, 0.0, 0.0));
         assert_eq!(mesh[v(2)].position(), Pt3::new(0.0, 1.0, 0.0));
         assert_eq!(mesh[v(3)].position(), Pt3::new(0.0, 0.0, 1.0));
-        assert_eq!(mesh.vertex(TetMesh::<(), ()>::GHOST).map(|v| v.value()), None);
+        assert_eq!(
+            mesh.vertex(TetMesh::<(), ()>::GHOST).map(|v| v.value()),
+            None
+        );
 
         assert_eq!(mesh.num_tets(), 5);
         assert_eq!(even_sort_4(mesh[t(0)].vertices()), [v(0), v(1), v(3), v(2)]);
@@ -1651,7 +1803,9 @@ mod tests {
         assert_eq!(walkers[0].opp_edge(&mesh), walkers[1].opp_edge(&mesh));
         assert_eq!(walkers[1].opp_edge(&mesh), walkers[2].opp_edge(&mesh));
         assert!(walkers[0].opp_edge(&mesh).contains(&v(4)));
-        assert!(walkers[0].opp_edge(&mesh).contains(&TetMesh::<(), ()>::GHOST));
+        assert!(walkers[0]
+            .opp_edge(&mesh)
+            .contains(&TetMesh::<(), ()>::GHOST));
 
         for tet in 0..9 {
             for i in 0..12 {
@@ -1771,7 +1925,10 @@ mod tests {
             .boundary_and_enclosed(&mesh, |_| true);
 
         assert_eq!(boundary, vec![]);
-        assert_eq!(enclosed.into_iter().collect::<FnvHashSet<_>>(), mesh.tets.keys().collect::<FnvHashSet<_>>());
+        assert_eq!(
+            enclosed.into_iter().collect::<FnvHashSet<_>>(),
+            mesh.tets.keys().collect::<FnvHashSet<_>>()
+        );
     }
 
     #[test]
@@ -1786,14 +1943,24 @@ mod tests {
 
         let walker = mesh.walker_from_tet(t(0));
         let (boundary, enclosed) = walker.flip14_unchecked(&mut mesh, v(4))[0]
-            .boundary_and_enclosed(&mesh, |t| mesh[t].vertices() == mesh[walker.id()].vertices());
+            .boundary_and_enclosed(&mesh, |t| {
+                mesh[t].vertices() == mesh[walker.id()].vertices()
+            });
 
-        assert_eq!(boundary.into_iter().map(BoundaryTri).collect::<FnvHashSet<_>>(), vec![
-            BoundaryTri(walker),
-            BoundaryTri(walker.to_twin_edge()),
-            BoundaryTri(walker.to_opp_edge()),
-            BoundaryTri(walker.to_perm(Permutation::_3210)),
-        ].into_iter().collect::<FnvHashSet<_>>());
+        assert_eq!(
+            boundary
+                .into_iter()
+                .map(BoundaryTri)
+                .collect::<FnvHashSet<_>>(),
+            vec![
+                BoundaryTri(walker),
+                BoundaryTri(walker.to_twin_edge()),
+                BoundaryTri(walker.to_opp_edge()),
+                BoundaryTri(walker.to_perm(Permutation::_3210)),
+            ]
+            .into_iter()
+            .collect::<FnvHashSet<_>>()
+        );
 
         assert_eq!(enclosed, vec![walker.id()]);
     }
@@ -1810,16 +1977,31 @@ mod tests {
 
         let walker = mesh.walker_from_tet(t(0));
         let (boundary, enclosed) = walker.flip14_unchecked(&mut mesh, v(4))[0]
-            .boundary_and_enclosed(&mesh, |t| !mesh[t].vertices().contains(&TetMesh::<(), ()>::GHOST));
+            .boundary_and_enclosed(&mesh, |t| {
+                !mesh[t].vertices().contains(&TetMesh::<(), ()>::GHOST)
+            });
 
-        assert_eq!(boundary.into_iter().map(|w| even_sort_3(w.tri(&mesh))).collect::<FnvHashSet<_>>(), vec![
-            [v(0), v(1), v(2)],
-            [v(1), v(3), v(2)],
-            [v(0), v(2), v(3)],
-            [v(0), v(3), v(1)],
-        ].into_iter().collect::<FnvHashSet<_>>());
+        assert_eq!(
+            boundary
+                .into_iter()
+                .map(|w| even_sort_3(w.tri(&mesh)))
+                .collect::<FnvHashSet<_>>(),
+            vec![
+                [v(0), v(1), v(2)],
+                [v(1), v(3), v(2)],
+                [v(0), v(2), v(3)],
+                [v(0), v(3), v(1)],
+            ]
+            .into_iter()
+            .collect::<FnvHashSet<_>>()
+        );
 
-        assert_eq!(enclosed.into_iter().collect::<FnvHashSet<_>>(), vec![t(0), t(5), t(6), t(7)].into_iter().collect::<FnvHashSet<_>>());
+        assert_eq!(
+            enclosed.into_iter().collect::<FnvHashSet<_>>(),
+            vec![t(0), t(5), t(6), t(7)]
+                .into_iter()
+                .collect::<FnvHashSet<_>>()
+        );
     }
 
     #[test]
@@ -1830,7 +2012,8 @@ mod tests {
             Pt3::origin(),
             (),
         ));
-        let (mut boundary, enclosed) = mesh.walker_from_tet(t(1))
+        let (mut boundary, enclosed) = mesh
+            .walker_from_tet(t(1))
             .boundary_and_enclosed(&mesh, |id| id == t(1));
         mesh.flip_in_vertex_unchecked(v(4), &mut boundary, &enclosed);
 
@@ -1879,11 +2062,12 @@ mod tests {
         }
 
         mesh.walker_from_tet(t(0)).flip14_unchecked(&mut mesh, v(4));
-        let (mut boundary, enclosed) = mesh.walker_from_tet(t(1))
-            .boundary_and_enclosed(&mesh, |t| {
-                let vs = mesh[t].vertices();
-                vs.contains(&v(1)) && vs.contains(&v(2)) && vs.contains(&v(3))
-            });
+        let (mut boundary, enclosed) =
+            mesh.walker_from_tet(t(1))
+                .boundary_and_enclosed(&mesh, |t| {
+                    let vs = mesh[t].vertices();
+                    vs.contains(&v(1)) && vs.contains(&v(2)) && vs.contains(&v(3))
+                });
 
         // 2-to-6 flip.
         mesh.flip_in_vertex_unchecked(v(5), &mut boundary, &enclosed);
@@ -1959,12 +2143,19 @@ mod tests {
 
         let tets = mesh.vertex_tets(v(4)).collect::<Vec<_>>();
         assert_eq!(tets.len(), 4);
-        assert_eq!(tets.into_iter().map(|tet| even_sort_4(mesh[tet].vertices())).collect::<FnvHashSet<_>>(), vec![
-            [v(1), v(2), v(4), v(3)],
-            [v(0), v(2), v(3), v(4)],
-            [v(0), v(1), v(4), v(3)],
-            [v(0), v(1), v(2), v(4)],
-        ].into_iter().collect::<FnvHashSet<_>>());
+        assert_eq!(
+            tets.into_iter()
+                .map(|tet| even_sort_4(mesh[tet].vertices()))
+                .collect::<FnvHashSet<_>>(),
+            vec![
+                [v(1), v(2), v(4), v(3)],
+                [v(0), v(2), v(3), v(4)],
+                [v(0), v(1), v(4), v(3)],
+                [v(0), v(1), v(2), v(4)],
+            ]
+            .into_iter()
+            .collect::<FnvHashSet<_>>()
+        );
     }
 
     #[test]
@@ -1979,7 +2170,12 @@ mod tests {
 
         let targets = mesh.vertex_targets(v(4)).collect::<Vec<_>>();
         assert_eq!(targets.len(), 4);
-        assert_eq!(targets.into_iter().collect::<FnvHashSet<_>>(), vec![v(0), v(1), v(2), v(3)].into_iter().collect::<FnvHashSet<_>>());
+        assert_eq!(
+            targets.into_iter().collect::<FnvHashSet<_>>(),
+            vec![v(0), v(1), v(2), v(3)]
+                .into_iter()
+                .collect::<FnvHashSet<_>>()
+        );
     }
 
     #[test]
@@ -2011,60 +2207,75 @@ mod tests {
 
     #[test]
     fn test_delaunay_tets_single() {
-        let mesh = TetMesh::<(), ()>::delaunay_from_vertices(vec![
-            (Pt3::new(0.0, 0.0, 0.0), ()),
-            (Pt3::new(1.0, 0.0, 0.0), ()),
-            (Pt3::new(0.0, 1.0, 0.0), ()),
-            (Pt3::new(0.0, 0.0, 1.0), ()),
-        ], || ());
-        
+        let mesh = TetMesh::<(), ()>::delaunay_from_vertices(
+            vec![
+                (Pt3::new(0.0, 0.0, 0.0), ()),
+                (Pt3::new(1.0, 0.0, 0.0), ()),
+                (Pt3::new(0.0, 1.0, 0.0), ()),
+                (Pt3::new(0.0, 0.0, 1.0), ()),
+            ],
+            || (),
+        );
+
         assert_eq!(mesh.num_vertices(), 4);
-        assert_tets(&mesh, vec![
-            [0, 1, 3, 2],
-            [3, 1, 0, u32::MAX],
-            [1, 3, 2, u32::MAX],
-            [0, 2, 3, u32::MAX],
-            [2, 0, 1, u32::MAX],
-        ]);
+        assert_tets(
+            &mesh,
+            vec![
+                [0, 1, 3, 2],
+                [3, 1, 0, u32::MAX],
+                [1, 3, 2, u32::MAX],
+                [0, 2, 3, u32::MAX],
+                [2, 0, 1, u32::MAX],
+            ],
+        );
     }
 
     #[test]
     fn test_delaunay_tets_multiple() {
-        let mesh = TetMesh::<(), ()>::delaunay_from_vertices(vec![
-            (Pt3::new(0.0, 0.0, 0.0), ()),
-            (Pt3::new(1.0, 0.0, 0.0), ()),
-            (Pt3::new(0.0, 1.0, 0.0), ()),
-            (Pt3::new(0.0, 0.0, 1.0), ()),
-            (Pt3::new(1.5, 1.5, 1.0), ()),
-            (Pt3::new(0.5, 0.5, 0.5), ()),
-        ], || ());
-        
+        let mesh = TetMesh::<(), ()>::delaunay_from_vertices(
+            vec![
+                (Pt3::new(0.0, 0.0, 0.0), ()),
+                (Pt3::new(1.0, 0.0, 0.0), ()),
+                (Pt3::new(0.0, 1.0, 0.0), ()),
+                (Pt3::new(0.0, 0.0, 1.0), ()),
+                (Pt3::new(1.5, 1.5, 1.0), ()),
+                (Pt3::new(0.5, 0.5, 0.5), ()),
+            ],
+            || (),
+        );
+
         assert_eq!(mesh.num_vertices(), 6);
-        assert_tets(&mesh, vec![
-            [0, 3, 2, 5],
-            [0, 1, 3, 5],
-            [1, 0, 2, 5],
-            [1, 4, 3, 5],
-            [3, 4, 2, 5],
-            [2, 4, 1, 5],
-            [0, 2, 3, u32::MAX],
-            [0, 3, 1, u32::MAX],
-            [1, 2, 0, u32::MAX],
-            [1, 3, 4, u32::MAX],
-            [3, 2, 4, u32::MAX],
-            [2, 1, 4, u32::MAX],
-        ]);
+        assert_tets(
+            &mesh,
+            vec![
+                [0, 3, 2, 5],
+                [0, 1, 3, 5],
+                [1, 0, 2, 5],
+                [1, 4, 3, 5],
+                [3, 4, 2, 5],
+                [2, 4, 1, 5],
+                [0, 2, 3, u32::MAX],
+                [0, 3, 1, u32::MAX],
+                [1, 2, 0, u32::MAX],
+                [1, 3, 4, u32::MAX],
+                [3, 2, 4, u32::MAX],
+                [2, 1, 4, u32::MAX],
+            ],
+        );
     }
 
     #[test]
     fn test_delaunay_tets_same_position() {
         // Simulation of simplicity is used. This should be perfectly fine.
-        let _mesh = TetMesh::<(), ()>::delaunay_from_vertices(vec![
-            (Pt3::new(0.0, 0.0, 0.0), ()),
-            (Pt3::new(0.0, 0.0, 0.0), ()),
-            (Pt3::new(1.0, 0.0, 0.0), ()),
-            (Pt3::new(0.0, 1.0, 0.0), ()),
-            (Pt3::new(0.0, 0.0, 1.0), ()),
-        ], || ());
+        let _mesh = TetMesh::<(), ()>::delaunay_from_vertices(
+            vec![
+                (Pt3::new(0.0, 0.0, 0.0), ()),
+                (Pt3::new(0.0, 0.0, 0.0), ()),
+                (Pt3::new(1.0, 0.0, 0.0), ()),
+                (Pt3::new(0.0, 1.0, 0.0), ()),
+                (Pt3::new(0.0, 0.0, 1.0), ()),
+            ],
+            || (),
+        );
     }
 }

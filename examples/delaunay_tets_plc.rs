@@ -30,10 +30,11 @@ fn main() {
 
         let tets = TetMesh::delaunay_from_vertices(
             plc.vertices().map(|(_, v)| (v.position(), *v.value())),
-            || ()
+            || (),
         );
 
-        tets.export_debug_obj(output).expect("Coult not save output");
+        tets.export_debug_obj(output)
+            .expect("Coult not save output");
     }
     #[cfg(not(feature = "obj"))]
     panic!("This example requires the \"obj\" feature.");

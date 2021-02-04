@@ -1,10 +1,10 @@
 mod id_map;
-mod util;
-pub mod tet;
 pub mod plc;
+pub mod tet;
+mod util;
 
-pub use crate::tet::{TetMesh, TetWalker};
 pub use crate::plc::Plc;
+pub use crate::tet::{TetMesh, TetWalker};
 
 use nalgebra::{Point1, Point3, Vector1, Vector3};
 
