@@ -71,6 +71,7 @@ pub(crate) fn hilbert_sort<V: Clone, I: IntoIterator<Item = (Pt3, V)>>(
 // fn-traits when
 
 /// Circular linked list iterator. Not to be used raw.
+#[derive(Clone, Debug)]
 pub struct CircularListIter<C, K, VF, NF> {
     pub(crate) common: C,
     start: K,

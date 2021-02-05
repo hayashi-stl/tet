@@ -19,7 +19,7 @@ float-ord = "0.2"
 hilbert = "0.1.1"
 bitflags = "1.2.1"
 ncollide3d = "0.27.0"
-bitvec = "0.20.1"
+stable-vec = "0.4.0"
 obj = { version = "0.10.2", optional = true }
 
 [dev-dependencies]

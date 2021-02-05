@@ -1,0 +1,157 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'tet'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "tet",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'delaunay_tets_plc'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=delaunay_tets_plc",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "delaunay_tets_plc",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'delaunay_tets_plc'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=delaunay_tets_plc",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "delaunay_tets_plc",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'delaunay_tets_random'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=delaunay_tets_random",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "delaunay_tets_random",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'delaunay_tets_random'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=delaunay_tets_random",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "delaunay_tets_random",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug example 'delaunay_tets_cospherical'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=delaunay_tets_cospherical",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "delaunay_tets_cospherical",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in example 'delaunay_tets_cospherical'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--example=delaunay_tets_cospherical",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "delaunay_tets_cospherical",
+                    "kind": "example"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug benchmark 'delaunay_tets'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bench=delaunay_tets",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "delaunay_tets",
+                    "kind": "bench"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

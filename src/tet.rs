@@ -1,5 +1,6 @@
 use bitflags::bitflags;
 use float_ord::FloatOrd;
+use util::CircularListIter;
 use std::{hint::unreachable_unchecked, iter::{self, Map}};
 use std::ops::Index;
 use std::{
@@ -9,7 +10,7 @@ use std::{
     path::Path,
 };
 
-use crate::util;
+use crate::{Plc, util};
 use crate::{
     id_map::{self, IdMap, IdType},
     Pt1,
@@ -26,6 +27,48 @@ crate::id! {
 crate::id! {
     /// A tet mesh tet id
     pub struct TetId
+}
+
+#[inline(always)]
+fn sorted_2(mut arr: [VertexId; 2]) -> [VertexId; 2] {
+    if arr[0] > arr[1] {
+        arr.swap(0, 1);
+    }
+    arr
+}
+
+fn sorted_3(mut arr: [VertexId; 3]) -> [VertexId; 3] {
+    if arr[0] > arr[1] {
+        arr.swap(0, 1);
+    }
+    if arr[0] > arr[2] {
+        arr.swap(0, 2);
+    }
+    if arr[0] > arr[1] {
+        arr.swap(0, 1);
+    }
+    arr
+}
+
+fn even_sorted_3(mut arr: [VertexId; 3]) -> [VertexId; 3] {
+    if arr[1] < arr[0] && arr[1] < arr[2] {
+        arr.swap(0, 1);
+        arr.swap(1, 2);
+    } else if arr[2] < arr[0] && arr[2] < arr[1] {
+        arr.swap(1, 2);
+        arr.swap(0, 1);
+    }
+    arr
+}
+
+/// Even-sorted list of 3 vertices
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
+struct TriVertices([VertexId; 3]);
+
+impl TriVertices {
+    fn new(vertices: [VertexId; 3]) -> Self {
+        Self(even_sorted_3(vertices))
+    }
 }
 
 bitflags! {
@@ -74,10 +117,12 @@ bitflags! {
     struct UndirEdgeFlags: u32 {
         /// Whether this edge is part of the boundary. Used in flip_in_vertex_unchecked.
         const BOUNDARY = 1 << 0;
+        /// Whether this edge is unflippable because it is an edge in the input PLC.
+        const LOCKED = 1 << 1;
     }
 }
 
-/// An undirected edge just stores its vertices.
+/// An undirected edge just stores its vertices. The vertices are sorted.
 #[derive(Clone, Debug)]
 struct UndirEdge {
     vertices: [VertexId; 2],
@@ -89,7 +134,7 @@ struct UndirEdge {
 impl UndirEdge {
     fn new(vertices: [VertexId; 2]) -> Self {
         Self {
-            vertices,
+            vertices: sorted_2(vertices),
             flags: Cell::new(UndirEdgeFlags::empty()),
             boundary_walker: TetWalker::new(TetId::invalid(), 0),
         }
@@ -189,6 +234,13 @@ impl Hash for BoundaryTri {
     }
 }
 
+/// An edge or triangle to remove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoveGoal {
+    Edge([VertexId; 2]),
+    Tri([VertexId; 3]),
+}
+
 const fn permutation_arr(inv: bool) -> [[u32; 12]; 12] {
     let mut arr = [[0; 12]; 12];
     let perms = [
@@ -280,7 +332,9 @@ pub enum Permutation {
 /// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TetWalker {
+    /// Important invariant: this is a valid tet.
     tet: TetId,
+    /// Important invariant: `edge` is in 0..12
     edge: u32,
 }
 
@@ -302,22 +356,30 @@ impl TetWalker {
 
     /// Gets the first vertex of the tet walker. This is the current vertex.
     pub fn first<V, T>(self, mesh: &TetMesh<V, T>) -> VertexId {
-        mesh.tets[self.tet].vertices[[3, 2, 1, 0, 2, 3, 0, 1, 1, 0, 3, 2][self.edge as usize]]
+        unsafe {
+            mesh.tets.get_unchecked(self.tet).vertices[*[3, 2, 1, 0, 2, 3, 0, 1, 1, 0, 3, 2].get_unchecked(self.edge as usize)]
+        }
     }
 
     /// Gets the second vertex of the tet walker. This is the current edge's target.
     pub fn second<V, T>(self, mesh: &TetMesh<V, T>) -> VertexId {
-        mesh.tets[self.tet].vertices[[2, 3, 0, 1, 1, 0, 3, 2, 3, 2, 1, 0][self.edge as usize]]
+        unsafe {
+            mesh.tets.get_unchecked(self.tet).vertices[*[2, 3, 0, 1, 1, 0, 3, 2, 3, 2, 1, 0].get_unchecked(self.edge as usize)]
+        }
     }
 
     /// Gets the third vertex of the tet walker.
     pub fn third<V, T>(self, mesh: &TetMesh<V, T>) -> VertexId {
-        mesh.tets[self.tet].vertices[[1, 0, 3, 2, 3, 2, 1, 0, 2, 3, 0, 1][self.edge as usize]]
+        unsafe {
+            mesh.tets.get_unchecked(self.tet).vertices[*[1, 0, 3, 2, 3, 2, 1, 0, 2, 3, 0, 1].get_unchecked(self.edge as usize)]
+        }
     }
 
     /// Gets the fourth vertex of the tet walker. This is the vertex opposite the current triangle.
     pub fn fourth<V, T>(self, mesh: &TetMesh<V, T>) -> VertexId {
-        mesh.tets[self.tet].vertices[[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3][self.edge as usize]]
+        unsafe {
+            mesh.tets.get_unchecked(self.tet).vertices[self.edge as usize % 4]
+        }
     }
 
     /// Gets the current edge of the tet walker.
@@ -351,6 +413,13 @@ impl TetWalker {
         ]
     }
 
+    /// Iterates over the walkers with the same current edge as this one
+    /// (including this one) in ring order.
+    pub fn edge_ring<'a, V, T>(self, mesh: &'a TetMesh<V, T>) -> WalkerEdgeRing<'a, V, T> {
+        WalkerEdgeRing(CircularListIter::new(
+            mesh, self, |_, _| (), |mesh, w| w.to_twin_edge().to_adj(mesh)))
+    }
+
     /// Gets the current tet id.
     pub fn id(self) -> TetId {
         self.tet
@@ -358,12 +427,16 @@ impl TetWalker {
 
     /// Gets the current undirected edge index.
     fn undir_edge_index(self) -> usize {
-        [0, 0, 1, 1, 2, 3, 3, 2, 4, 5, 4, 5][self.edge as usize]
+        unsafe {
+            *[0, 0, 1, 1, 2, 3, 3, 2, 4, 5, 4, 5].get_unchecked(self.edge as usize)
+        }
     }
 
     /// Gets the current undirected edge id.
     fn undir_edge<V, T>(self, mesh: &TetMesh<V, T>) -> UndirEdgeId {
-        mesh.tets[self.id()].edges[self.undir_edge_index()]
+        unsafe {
+            mesh.tets.get_unchecked(self.id()).edges[self.undir_edge_index()]
+        }
     }
 
     crate::alias! {
@@ -388,7 +461,9 @@ impl TetWalker {
         to_nve,
         /// Advance to the next edge from the current vertex. This is a counterclockwise rotation.
         pub fn to_next_vertex_edge((mut) self: Self) -> Self {
-            self.edge = [10, 11, 8, 9, 1, 0, 3, 2, 7, 6, 5, 4][self.edge as usize];
+            unsafe {
+                self.edge = *[10, 11, 8, 9, 1, 0, 3, 2, 7, 6, 5, 4].get_unchecked(self.edge as usize);
+            }
             self
         }
     }
@@ -397,20 +472,26 @@ impl TetWalker {
         to_pve,
         /// Advance to the previous edge from the current vertex. This is a clockwise rotation.
         pub fn to_prev_vertex_edge((mut) self: Self) -> Self {
-            self.edge = [5, 4, 7, 6, 11, 10, 9, 8, 2, 3, 0, 1][self.edge as usize];
+            unsafe {
+                self.edge = *[5, 4, 7, 6, 11, 10, 9, 8, 2, 3, 0, 1].get_unchecked(self.edge as usize);
+            }
             self
         }
     }
 
     /// Flip the current edge, keeping the current tet the same.
     pub fn to_twin_edge(mut self) -> Self {
-        self.edge = [1, 0, 3, 2, 7, 6, 5, 4, 10, 11, 8, 9][self.edge as usize];
+        unsafe {
+            self.edge = *[1, 0, 3, 2, 7, 6, 5, 4, 10, 11, 8, 9].get_unchecked(self.edge as usize);
+        }
         self
     }
 
     /// Sets the current edge to the opposite edge of the current tet.
     pub fn to_opp_edge(mut self) -> Self {
-        self.edge = [2, 3, 0, 1, 5, 4, 7, 6, 11, 10, 9, 8][self.edge as usize];
+        unsafe {
+            self.edge = *[2, 3, 0, 1, 5, 4, 7, 6, 11, 10, 9, 8].get_unchecked(self.edge as usize);
+        }
         self
     }
 
@@ -429,8 +510,10 @@ impl TetWalker {
     /// 1032 | `to_twin_edge`
     /// 2301 | `to_opp_edge`
     pub fn to_perm(mut self, perm: Permutation) -> Self {
-        // Don't question the indexing order here, it just works™
-        self.edge = Self::PERMUTATION_FWD[self.edge as usize][perm as usize];
+        unsafe {
+            // Don't question the indexing order here, it just works™
+            self.edge = Self::PERMUTATION_FWD.get_unchecked(self.edge as usize)[perm as usize];
+        }
         self
     }
 
@@ -440,7 +523,9 @@ impl TetWalker {
         /// This flips the current edge.
         pub fn to_twin_tri<V, T>((mut) self: Self, mesh: &TetMesh<V, T>) -> Self {
             let div = self.edge / 4;
-            self = mesh[self.id()].opp_tets[self.edge as usize % 4];
+            unsafe {
+                self = mesh.tets.get_unchecked(self.id()).opp_tets[self.edge as usize % 4];
+            }
             match div {
                 0 => self,
                 1 => self.to_prev_tri_edge(),
@@ -456,7 +541,9 @@ impl TetWalker {
         /// This moves to some edge on that triangle.
         /// Use this method if you don't care which edge the walker ends up on.
         pub fn to_twin_tri_any_edge<V, T>(self: Self, mesh: &TetMesh<V, T>) -> Self {
-            mesh[self.id()].opp_tets[self.edge as usize % 4]
+            unsafe {
+                mesh.tets.get_unchecked(self.id()).opp_tets[self.edge as usize % 4]
+            }
         }
     }
 
@@ -473,6 +560,11 @@ impl TetWalker {
         self
     }
 
+    fn to_edge(mut self, edge: u32) -> Self {
+        self.edge = edge;
+        self
+    }
+
     /// Performs a 1-to-4 flip on the mesh without checking whether
     /// such a flip produces negative-volume tets. Use at your own risk.
     /// Returns walkers of the 4 tets added. Each walker's 4th vertex is the new vertex.
@@ -485,6 +577,12 @@ impl TetWalker {
         let id1 = mesh.tets.insert(mesh.tets[id0].clone());
         let id2 = mesh.tets.insert(mesh.tets[id0].clone());
         let id3 = mesh.tets.insert(mesh.tets[id0].clone());
+
+        if mesh.track_tri_map {
+            for i in 0..4 {
+                mesh.tri_map.remove(&TriVertices::new(self.to_edge(i).tri(mesh)));
+            }
+        }
 
         // The vertex didn't have a tet before.
         mesh.vertices[vertex].tet = self;
@@ -550,6 +648,15 @@ impl TetWalker {
             mesh.tets[walker.id()].opp_tets[walker.edge as usize % 4].tet = ids[i];
         }
 
+        if mesh.track_tri_map {
+            for id in &ids {
+                for i in 0..4 {
+                    let walker = TetWalker::new(*id, i);
+                    mesh.tri_map.insert(TriVertices::new(walker.tri(mesh)), walker);
+                }
+            }
+        }
+
         [
             TetWalker::new(id0, 0),
             TetWalker::new(id1, 1),
@@ -560,7 +667,8 @@ impl TetWalker {
 
     /// Performs a 2-to-3 flip on the mesh without checking whether
     /// such a flip produces negative-volume tets. Use at your own risk.
-    /// Returns walkers of the 3 tets created. Each walker's opposite edge is the new edge.
+    /// Returns walkers of the 3 tets created. Each walker's opposite edge is the new edge
+    /// and the first walker's current edge is the same as this walker's current edge.
     pub fn flip23_unchecked<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>) -> [TetWalker; 3] {
         // Walker on other tri
         let other = self.to_adj(&mesh);
@@ -569,6 +677,14 @@ impl TetWalker {
         let id1 = other.id();
         let id2 = mesh.tets.insert(mesh.tets[id0].clone());
         let ids = [id0, id1, id2];
+
+        if mesh.track_tri_map {
+            for walker in &[self, other] {
+                for i in 0..4 {
+                    mesh.tri_map.remove(&TriVertices::new(walker.to_edge(i).tri(mesh)));
+                }
+            }
+        }
 
         // Fix tet walkers on adjacent tets
         let mut adj_t = [TetWalker::new(TetId::invalid(), 0); 3];
@@ -638,10 +754,19 @@ impl TetWalker {
             mesh.tets[ids[i]].edges[5] = adj_t[i].to_nfe().undir_edge(mesh);
         }
 
+        if mesh.track_tri_map {
+            for id in &ids {
+                for i in 0..4 {
+                    let walker = TetWalker::new(*id, i);
+                    mesh.tri_map.insert(TriVertices::new(walker.tri(mesh)), walker);
+                }
+            }
+        }
+
         [
-            TetWalker::new(id0, 3),
-            TetWalker::new(id1, 3),
-            TetWalker::new(id2, 3),
+            TetWalker::new(id0, 2),
+            TetWalker::new(id1, 2),
+            TetWalker::new(id2, 2),
         ]
     }
 
@@ -655,6 +780,14 @@ impl TetWalker {
 
         let id0 = self.id();
         let id1 = other1.id();
+
+        if mesh.track_tri_map {
+            for walker in &[self, other1, other2] {
+                for i in 0..4 {
+                    mesh.tri_map.remove(&TriVertices::new(walker.to_edge(i).tri(mesh)));
+                }
+            }
+        }
 
         // Fix tet walkers on adjacent tets
         let mut adj_t = [TetWalker::new(TetId::invalid(), 0); 3];
@@ -729,7 +862,114 @@ impl TetWalker {
         mesh.edges.remove(other2.undir_edge(mesh));
         mesh.tets.remove(other2.id());
 
+        if mesh.track_tri_map {
+            for id in &[id0, id1] {
+                for i in 0..4 {
+                    let walker = TetWalker::new(*id, i);
+                    mesh.tri_map.insert(TriVertices::new(walker.tri(mesh)), walker);
+                }
+            }
+        }
+
         [TetWalker::new(id0, 10), TetWalker::new(id1, 10)]
+    }
+
+    /// Attempts to remove this walker's edge to make progress towards removing something from `goals`.
+    /// Returns the index in `goals` to the removed edge and a walker to the new tri if it succeeds or something from `goals` is removed.
+    /// The vertices in `goals` must be sorted.
+    ///
+    /// - `bad_edges` is a set of edges to not add tris to.
+    /// 
+    /// WARNING: This invalidates all tet walkers.
+    fn progress_by_removing_edge<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>,
+        depth: usize, goals: &mut Vec<RemoveGoal>, bad_edges: &mut Vec<[VertexId; 2]>) -> Option<usize>
+    {
+        if depth == 0 || mesh.edges[self.undir_edge(mesh)].flags.get().intersects(UndirEdgeFlags::LOCKED) {
+            return None;
+        }
+
+        // Be sure to pop this goal before every return
+        goals.push(RemoveGoal::Edge(sorted_2(self.edge(mesh))));
+
+        let mut ring = self.edge_ring(mesh).collect::<Vec<_>>();
+        let mut edges = ring.iter().map(|w| w.edge(mesh)).collect::<Vec<_>>();
+
+        // Can't do a 3-to-2 flip without starting from 3
+        while ring.len() > 3 {
+            let walker = ring.pop().unwrap();
+            let edge = edges.pop().unwrap();
+
+            // Check that the walker hasn't been invalidated
+            if mesh.tet(walker.id()).is_none() || walker.edge(mesh) != edge {
+                continue;
+            }
+
+            // Avoid flipping a triangle to the edge I'm trying to remove triangles from!
+            bad_edges.push(sorted_2(walker.edge(mesh)));
+            let index = walker.progress_by_removing_tri(mesh, depth, goals, bad_edges);
+            bad_edges.pop();
+
+            if index.map(|i| i < goals.len()).unwrap_or(true) {
+                goals.pop();
+                return index;
+            }
+        }
+
+
+        // Get the *first* index of the goal, in case an earlier function call wanted to remove the same edge.
+        // If the goal is not here, that's a bug.
+        let goal_index = goals.iter().position(|g| g == goals.last().unwrap()).unwrap();
+        self.flip32_unchecked(mesh);
+        goals.pop();
+        Some(goal_index)
+    }
+
+    /// Attempts to remove this walker's triangle to make progress towards removing something from `goals`.
+    /// Returns the index in `goals` to the removed triangle and a walker to the same edge if it succeeds or something from `goals` is removed.
+    /// The vertices in `goals` must be sorted.
+    ///
+    /// - `bad_edges` is a set of edges to not add tris to.
+    /// 
+    /// WARNING: This invalidates all tet walkers.
+    fn progress_by_removing_tri<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>,
+        depth: usize, goals: &mut Vec<RemoveGoal>, bad_edges: &mut Vec<[VertexId; 2]>) -> Option<usize>
+    {
+        if depth == 0 {
+            return None;
+        }
+
+        // Be sure to pop this goal before every return
+        goals.push(RemoveGoal::Tri(sorted_3(self.tri(mesh))));
+
+        // Make sure there's no edge blocking the way.
+        let adj = self.to_adj_ae(mesh);
+        let ([v0, v1, v2, v3], v4) = (self.tet(mesh), adj.fourth(mesh));
+
+        // Careful of ghost vertices!
+        // If v3 or v4 is a ghost vertex, no edge can stop the flip by being concave.
+        // If one of v0, v1, v2 is a ghost vertex, the only edge that can stop the flip is the one that is not attached to a ghost vertex.
+
+        if ![v3, v4].contains(&TetMesh::<V, T>::GHOST) {
+            for (va, vb, walker) in &[(v0, v1, self), (v1, v2, self.to_nfe()), (v2, v0, self.to_pfe())] {
+                if ![*va, *vb].contains(&TetMesh::<V, T>::GHOST) && sim::orient_3d(mesh, TetMesh::<V, T>::idx, *va, *vb, v3, v4) {
+                    let index = walker.progress_by_removing_edge(mesh, depth - 1, goals, bad_edges);
+
+                    // Pass success of removing an earlier goal along, and also quit on failure
+                    if index.map(|i| i < goals.len()).unwrap_or(true) {
+                        goals.pop();
+                        return index;
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Get the *first* index of the goal, in case an earlier function call wanted to remove the same tri.
+        // If the goal is not here, that's a bug.
+        let goal_index = goals.iter().position(|g| g == goals.last().unwrap()).unwrap();
+        self.flip23_unchecked(mesh);
+        goals.pop();
+        Some(goal_index)
     }
 
     /// Returns the boundary of the region of tets that satisfy some predicate, starting at the current tet.
@@ -811,6 +1051,19 @@ impl TetWalker {
     }
 }
 
+/// Iterates over tet walkers with the same current edge in ring order.
+#[derive(Clone, Debug)]
+pub struct WalkerEdgeRing<'a, V, T>(CircularListIter<&'a TetMesh<V, T>, TetWalker,
+    fn(&'a TetMesh<V, T>, TetWalker) -> (), fn(&'a TetMesh<V, T>, TetWalker) -> TetWalker>);
+
+impl<'a, V, T> Iterator for WalkerEdgeRing<'a, V, T> {
+    type Item = TetWalker;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|(walker, _)| walker)
+    }
+}
+
 /// A manifold tetrahedralization.
 #[derive(Clone, Debug)]
 pub struct TetMesh<V, T> {
@@ -818,6 +1071,10 @@ pub struct TetMesh<V, T> {
     ghost_flags: Cell<VertexFlags>,
     edges: IdMap<UndirEdgeId, UndirEdge>,
     tets: IdMap<TetId, Tet<T>>,
+    /// Map from even-sorted triangles to tet walkers for those triangles.
+    /// This is slow to track, so don't track it all the time.
+    tri_map: FnvHashMap<TriVertices, TetWalker>,
+    track_tri_map: bool,
     default_tet: fn() -> T,
 }
 
@@ -841,6 +1098,8 @@ impl<V, T> TetMesh<V, T> {
             ghost_flags: Cell::new(VertexFlags::empty()),
             edges: IdMap::default(),
             tets: IdMap::default(),
+            tri_map: FnvHashMap::default(),
+            track_tri_map: false,
             default_tet,
         };
 
@@ -929,6 +1188,23 @@ impl<V, T> TetMesh<V, T> {
                         *edges, default_tet())),
             )
             .for_each(|_| {});
+    }
+
+    /// Sets whether to track the triangle map.
+    fn set_track_tri_map(&mut self, flag: bool) {
+        if flag {
+            self.track_tri_map = true;
+            // Start now.
+            self.tri_map.clear();
+            for id in self.tets.keys() {
+                for i in 0..4 {
+                    let walker = TetWalker::new(id, i);
+                    self.tri_map.insert(TriVertices::new(walker.tri(self)), walker);
+                }
+            }
+        } else {
+            self.track_tri_map = false;
+        }
     }
 
     /// Gets a reference to the flags of the vertex.
@@ -1136,6 +1412,14 @@ impl<V, T> TetMesh<V, T> {
     ) where
         T: Clone,
     {
+        if self.track_tri_map {
+            for id in enclosure {
+                for i in 0..4 {
+                    self.tri_map.remove(&TriVertices::new(TetWalker::new(*id, i).tri(self)));
+                }
+            }
+        }
+
         // Delete tets that don't even have a triangle on the boundary
         // Mark boundary
         for walker in &*boundary {
@@ -1254,6 +1538,16 @@ impl<V, T> TetMesh<V, T> {
             *self.vertex_flags_mut(walker.to_nfe().first(self)).get_mut() &= !VertexFlags::EDGE_ADDED;
             *self.vertex_flags_mut(walker.to_pfe().first(self)).get_mut() &= !VertexFlags::EDGE_ADDED;
         }
+
+        if self.track_tri_map {
+            for walker in &*boundary {
+                for i in 0..4 {
+                    let walker = walker.to_edge(i);
+                    self.tri_map.insert(TriVertices::new(walker.tri(self)), walker);
+                }
+            }
+        }
+
     }
 
     /// Create a Delaunay tetrahedralization from vertices. Panics if there are less than 4 vertices
@@ -1272,6 +1566,8 @@ impl<V, T> TetMesh<V, T> {
             ghost_flags: Cell::new(VertexFlags::empty()),
             edges: IdMap::default(),
             tets: IdMap::default(),
+            tri_map: FnvHashMap::default(),
+            track_tri_map: false,
             default_tet,
         };
         let mut vertices = util::hilbert_sort(vertices);
@@ -1411,6 +1707,23 @@ impl<V, T> TetMesh<V, T> {
         self.flip_in_vertex_unchecked(id, &mut boundary, &enclosed);
 
         id
+    }
+
+    /// Recovers edges in a PLC, adding Steiner points as necessary in both the tet mesh and the PLC,
+    /// and locks them to prevent them from flipping outside of unchecked flip functions.
+    pub fn recover_and_lock_edges<E, F>(&mut self, plc: &mut Plc<V, E, F>) {
+        let mut plc_edges = plc.edges().map(|(_, edge)| sorted_2(edge.vertices())).collect::<FnvHashSet<_>>();
+
+        // Lock already recovered edges
+        for (id, edge) in self.edges.iter() {
+            if plc_edges.remove(&edge.vertices) {
+                // No need to remove the reverse because `edge.vertices` is sorted.
+                edge.set_flags(UndirEdgeFlags::LOCKED);
+            }
+        }
+
+        let to_recover = plc_edges.into_iter().collect::<Vec<_>>();
+        println!("Edges to recover: {}", to_recover.len());
     }
 
     #[cfg(feature = "obj")]
@@ -1702,6 +2015,7 @@ mod tests {
         // Edge invariants
         for (id, edge) in mesh.edges.iter() {
             assert_ne!(edge.vertices[0], edge.vertices[1], "Edge {} has equal vertices.", id);
+            assert!(edge.vertices[0] < edge.vertices[1], "Edge {} has unsorted vertices.", id);
         }
         let edge_set = mesh.edges.values()
             .map(|edge| {
@@ -1719,6 +2033,13 @@ mod tests {
         }
         if !edge_ids.is_empty() {
             panic!("Edge {} does not belong to a tet.", edge_ids.iter().next().unwrap());
+        }
+
+        if mesh.track_tri_map {
+            for (tri, walker) in &mesh.tri_map {
+                assert_eq!(TriVertices::new(walker.tri(mesh)), *tri, "Triangle {}-{}-{} points to the wrong tet walker: ({}, {})",
+                    tri.0[0], tri.0[1], tri.0[2], walker.id(), walker.edge);
+            }
         }
 
         // Tet invariants
@@ -1744,6 +2065,11 @@ mod tests {
                 vs[..2].sort();
                 edge_vs.sort();
                 assert_eq!(vs[..2], edge_vs, "Tet walker ({}, {}) does not point to the right edge.", walker.id(), walker.edge);
+
+                if i < 4 && mesh.track_tri_map {
+                    assert!(mesh.tri_map.contains_key(&TriVertices::new(walker.tri(mesh))), "Tet walker ({}, {}) has triangle missing from map",
+                        walker.id(), walker.edge);
+                }
             }
         }
     }
@@ -1757,7 +2083,7 @@ mod tests {
     }
 
     fn default_tets() -> TetMesh<(), ()> {
-        TetMesh::new(
+        let mut tets = TetMesh::new(
             [
                 (Pt3::new(0.0, 0.0, 0.0), ()),
                 (Pt3::new(0.0, 0.0, 1.0), ()),
@@ -1765,11 +2091,13 @@ mod tests {
                 (Pt3::new(1.0, 0.0, 0.0), ()),
             ],
             || (),
-        )
+        );
+        tets.set_track_tri_map(true);
+        tets
     }
 
     fn reverse_tets() -> TetMesh<(), ()> {
-        TetMesh::new(
+        let mut tets = TetMesh::new(
             [
                 (Pt3::new(0.0, 0.0, 0.0), ()),
                 (Pt3::new(1.0, 0.0, 0.0), ()),
@@ -1777,7 +2105,9 @@ mod tests {
                 (Pt3::new(0.0, 0.0, 1.0), ()),
             ],
             || (),
-        )
+        );
+        tets.set_track_tri_map(true);
+        tets
     }
 
     #[track_caller]

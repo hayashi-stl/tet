@@ -287,6 +287,11 @@ impl<V, E, F> Plc<V, E, F> {
         self.faces.len()
     }
 
+    /// Gets the id of an edge, given its vertices.
+    pub fn edge_id(&self, vertices: [VertexId; 2]) -> Option<EdgeId> {
+        self.edge_map.get(&vertices).copied()
+    }
+
     /// Gets a vertex, if it exists.
     pub fn vertex(&self, vertex: VertexId) -> Option<&Vertex<V>> {
         self.vertices.get(vertex)

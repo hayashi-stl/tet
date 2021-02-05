@@ -1,4 +1,4 @@
-//! Loads a PLC, Delaunay tetrahedralizes its vertices, and exports the result as an obj
+//! Loads a PLC, tetrahedralizes the PLC, and exports the result as an obj
 //! where each tet has its own vertices.
 //! Requires the "obj" feature.
 
@@ -23,15 +23,16 @@ fn main() {
             panic!("Missing output obj")
         });
 
-        let plc = Plc::load_obj(input, || (), || (), || ()).expect("Could not load input");
-        if let Err(err) = plc.validate(0.001) {
+        let mut plc = Plc::load_obj(input, || (), || (), || ()).expect("Could not load input");
+        if let Err(err) = plc.validate(0.0015) {
             panic!("{}", err)
         }
 
-        let tets = TetMesh::delaunay_from_vertices(
+        let mut tets = TetMesh::delaunay_from_vertices(
             plc.vertices().map(|(_, v)| (v.position(), *v.value())),
             || (),
         );
+        tets.recover_and_lock_edges(&mut plc);
 
         tets.export_debug_obj(output)
             .expect("Coult not save output");

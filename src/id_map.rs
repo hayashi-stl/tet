@@ -7,7 +7,8 @@ use std::{
     ops::{Index, IndexMut},
     slice,
 };
-use bitvec::prelude::*;
+use stable_vec::StableVec;
+use stable_vec::core::DefaultCore;
 
 pub type IdType = u32;
 
@@ -21,7 +22,7 @@ pub trait Id: Copy {
 /// Expects few deletions because they would make iteration slower.
 #[derive(Clone, Debug)]
 pub(crate) struct IdMap<K, V> {
-    map: Vec<Option<V>>,
+    map: StableVec<V>,
     free: Vec<IdType>,
     marker: PhantomData<K>,
 }
@@ -29,7 +30,7 @@ pub(crate) struct IdMap<K, V> {
 impl<K, V> Default for IdMap<K, V> {
     fn default() -> Self {
         Self {
-            map: vec![],
+            map: StableVec::default(),
             free: vec![],
             marker: PhantomData,
         }
@@ -44,47 +45,62 @@ impl<K: Id, V> IdMap<K, V> {
 
     /// Gets the length of the map
     pub(crate) fn len(&self) -> usize {
-        self.map.len() - self.free.len()
+        debug_assert_eq!(self.map.num_elements(), self.map.next_push_index() - self.free.len());
+        self.map.num_elements()
     }
 
     /// Gets the value with a specific key, if it exists.
     pub(crate) fn get(&self, key: K) -> Option<&V> {
-        self.map.get(key.int() as usize).and_then(|v| v.as_ref())
+        self.map.get(key.int() as usize)
     }
 
     /// Gets the value with a specific key mutably, if it exists.
     pub(crate) fn get_mut(&mut self, key: K) -> Option<&mut V> {
         self.map
             .get_mut(key.int() as usize)
-            .and_then(|v| v.as_mut())
+    }
+
+    /// Gets the value with a specific key, if it exists.
+    ///
+    /// Safety: there must be value with this key.
+    pub(crate) unsafe fn get_unchecked(&self, key: K) -> &V {
+        self.map.get_unchecked(key.int() as usize)
+    }
+
+    /// Gets the value with a specific key mutably, if it exists.
+    ///
+    /// Safety: there must be value with this key.
+    pub(crate) unsafe fn get_unchecked_mut(&mut self, key: K) -> &mut V {
+        self.map
+            .get_unchecked_mut(key.int() as usize)
     }
 
     /// Inserts a value into the map and returns the key for that value.
     pub(crate) fn insert(&mut self, value: V) -> K {
         if let Some(key) = self.free.pop() {
-            self.map[key as usize] = Some(value);
+            self.map.insert(key as usize, value);
             K::from_int(key)
         } else {
-            self.map.push(Some(value));
-            K::from_int(self.map.len() as IdType - 1)
+            let idx = self.map.push(value);
+            K::from_int(idx as IdType)
         }
     }
 
     /// Inserts a value into the map with a specific key and returns the value that was previously there, if it existed.
     pub(crate) fn insert_with_key(&mut self, key: K, value: V) -> Option<V> {
-        if key.int() as usize >= self.map.len() {
+        let mut expanded = false;
+        if key.int() as usize >= self.map.next_push_index() {
             // Create more space
-            self.free.extend(self.map.len() as IdType..key.int());
-            self.map.resize_with(key.int() as usize + 1, || None);
-            self.map[key.int() as usize] = Some(value);
-            None
-        } else {
-            let old = std::mem::replace(&mut self.map[key.int() as usize], Some(value));
-            if old.is_none() {
-                self.free.remove(self.free.iter().position(|k| *k == key.int()).unwrap());
-            }
-            old
+            self.free.extend(self.map.next_push_index() as IdType..key.int());
+            self.map.reserve(key.int() as usize + 1 - self.map.next_push_index());
+            expanded = true;
         }
+
+        let old = self.map.insert(key.int() as usize, value);
+        if old.is_none() && !expanded {
+            self.free.remove(self.free.iter().position(|k| *k == key.int()).unwrap());
+        }
+        old
     }
 
     /// Extends the values with an iterator and returns an iterator over the keys in order of insertion.
@@ -101,24 +117,26 @@ impl<K: Id, V> IdMap<K, V> {
 
     /// Removes the value with a specific key and returns that value, if it existed.
     pub(crate) fn remove(&mut self, key: K) -> Option<V> {
-        let opt_value = self
-            .map
-            .get_mut(key.int() as usize)
-            .unwrap_or(&mut None)
-            .take();
+        if (key.int() as usize) < self.map.capacity() {
+            let opt_value = self
+                .map
+                .remove(key.int() as usize);
 
-        if opt_value.is_some() {
-            self.free.push(key.int());
+            if opt_value.is_some() {
+                self.free.push(key.int());
+            }
+
+            opt_value
+        } else {
+            None
         }
-
-        opt_value
     }
 
     /// Keeps only the values that satisfy some predicate.
     pub(crate) fn retain<F: FnMut(K, &V) -> bool>(&mut self, mut pred: F) {
-        for i in 0..self.map.len() {
+        for i in 0..self.map.next_push_index() {
             let key = K::from_int(i as IdType);
-            if !self.get(key).map(|v| pred(key, v)).unwrap_or(true) {
+            if self.get(key).map(|v| !pred(key, v)).unwrap_or(false) {
                 self.remove(key);
             }
         }
@@ -133,7 +151,7 @@ impl<K: Id, V> IdMap<K, V> {
     /// Iterates over (key, &value) pairs.
     pub(crate) fn iter(&self) -> Iter<K, V> {
         Iter {
-            iter: self.map.iter().enumerate(),
+            iter: self.map.iter(),
             marker: PhantomData,
         }
     }
@@ -141,7 +159,7 @@ impl<K: Id, V> IdMap<K, V> {
     /// Iterates over (key, &mut value) pairs.
     pub(crate) fn iter_mut(&mut self) -> IterMut<K, V> {
         IterMut {
-            iter: self.map.iter_mut().enumerate(),
+            iter: self.map.iter_mut(),
             marker: PhantomData,
         }
     }
@@ -149,7 +167,7 @@ impl<K: Id, V> IdMap<K, V> {
     /// Iterates over keys.
     pub(crate) fn keys(&self) -> Keys<K, V> {
         Keys {
-            iter: self.map.iter().enumerate(),
+            iter: self.map.indices(),
             marker: PhantomData,
         }
     }
@@ -182,7 +200,7 @@ impl<K: Id, V> IntoIterator for IdMap<K, V> {
 
     fn into_iter(self) -> Self::IntoIter {
         Self::IntoIter {
-            iter: self.map.into_iter().enumerate(),
+            iter: self.map.into_iter(),
             marker: PhantomData,
         }
     }
@@ -210,7 +228,7 @@ impl<K: Id, V> FromIterator<V> for IdMap<K, V> {
     /// The keys are in order of the values returned by the iterator.
     fn from_iter<T: IntoIterator<Item = V>>(iter: T) -> Self {
         let mut map = Self::new();
-        map.map.extend(iter.into_iter().map(|v| Some(v)));
+        map.map.extend(iter);
         map
     }
 }
@@ -245,7 +263,7 @@ impl<'a, K: Id, V, I: Iterator<Item = V>> Iterator for ExtendValues<'a, K, V, I>
 }
 
 pub struct Keys<'a, K, V> {
-    iter: Enumerate<slice::Iter<'a, Option<V>>>,
+    iter: stable_vec::iter::Indices<'a, V, DefaultCore<V>>,
     marker: PhantomData<K>,
 }
 
@@ -253,68 +271,48 @@ impl<'a, K: Id, V> Iterator for Keys<'a, K, V> {
     type Item = K;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((key, value)) = self.iter.next() {
-            if let Some(_) = value.as_ref() {
-                return Some(K::from_int(key as IdType));
-            }
-        }
-        None
+        self.iter.next().map(|k| K::from_int(k as IdType))
     }
 }
 
 pub(crate) struct IntoValues<V> {
-    iter: vec::IntoIter<Option<V>>,
+    iter: stable_vec::iter::IntoIter<V, DefaultCore<V>>,
 }
 
 impl<V> Iterator for IntoValues<V> {
     type Item = V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(value) = self.iter.next() {
-            if let Some(value) = value {
-                return Some(value);
-            }
-        }
-        None
+        self.iter.next().map(|(k, v)| v)
     }
 }
 
 pub(crate) struct Values<'a, V> {
-    iter: slice::Iter<'a, Option<V>>,
+    iter: stable_vec::iter::Iter<'a, V, DefaultCore<V>>,
 }
 
 impl<'a, V> Iterator for Values<'a, V> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(value) = self.iter.next() {
-            if let Some(value) = value.as_ref() {
-                return Some(value);
-            }
-        }
-        None
+        self.iter.next().map(|(k, v)| v)
     }
 }
 
 pub(crate) struct ValuesMut<'a, V> {
-    iter: slice::IterMut<'a, Option<V>>,
+    iter: stable_vec::iter::IterMut<'a, V, DefaultCore<V>>,
 }
 
 impl<'a, V> Iterator for ValuesMut<'a, V> {
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(value) = self.iter.next() {
-            if let Some(value) = value.as_mut() {
-                return Some(value);
-            }
-        }
-        None
+        self.iter.next().map(|(k, v)| v)
     }
 }
 
 pub(crate) struct IntoIter<K, V> {
-    iter: Enumerate<vec::IntoIter<Option<V>>>,
+    iter: stable_vec::iter::IntoIter<V, DefaultCore<V>>,
     marker: PhantomData<K>,
 }
 
@@ -322,17 +320,12 @@ impl<K: Id, V> Iterator for IntoIter<K, V> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((i, value)) = self.iter.next() {
-            if let Some(value) = value {
-                return Some((K::from_int(i as IdType), value));
-            }
-        }
-        None
+        self.iter.next().map(|(k, v)| (K::from_int(k as IdType), v))
     }
 }
 
 pub struct Iter<'a, K, V> {
-    iter: Enumerate<slice::Iter<'a, Option<V>>>,
+    iter: stable_vec::iter::Iter<'a, V, DefaultCore<V>>,
     marker: PhantomData<K>,
 }
 
@@ -340,17 +333,12 @@ impl<'a, K: Id, V> Iterator for Iter<'a, K, V> {
     type Item = (K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((i, value)) = self.iter.next() {
-            if let Some(value) = value.as_ref() {
-                return Some((K::from_int(i as IdType), value));
-            }
-        }
-        None
+        self.iter.next().map(|(k, v)| (K::from_int(k as IdType), v))
     }
 }
 
 pub(crate) struct IterMut<'a, K, V> {
-    iter: Enumerate<slice::IterMut<'a, Option<V>>>,
+    iter: stable_vec::iter::IterMut<'a, V, DefaultCore<V>>,
     marker: PhantomData<K>,
 }
 
@@ -358,12 +346,7 @@ impl<'a, K: Id, V> Iterator for IterMut<'a, K, V> {
     type Item = (K, &'a mut V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((i, value)) = self.iter.next() {
-            if let Some(value) = value.as_mut() {
-                return Some((K::from_int(i as IdType), value));
-            }
-        }
-        None
+        self.iter.next().map(|(k, v)| (K::from_int(k as IdType), v))
     }
 }
 
