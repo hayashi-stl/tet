@@ -3595,7 +3595,7 @@ mod tests {
         let mut mesh = TetMesh::<(), ()>::delaunay_from_vertices(
             vec![
                 (Pt3::new(1.0, 0.0, 0.0), ()),
-                (Pt3::new(-1.0, 1.0, 0.0), ()),
+                (Pt3::new(-1.0, -0.5, 0.0), ()),
                 (Pt3::new(-1.0, -1.0, 0.0), ()),
                 (Pt3::new(-1.1, 0.0, 2.0), ()),
                 (Pt3::new(-1.1, 0.0, -2.0), ()),
@@ -3624,4 +3624,69 @@ mod tests {
         assert_integrity(&mesh, true);
     }
 
+    #[test]
+    fn test_progress_remove_tri_ghost_concavity() {
+        // An edge attached to a ghost triangle is concave.
+        let mut mesh = default_tets();
+        let tets = mesh
+            .tets()
+            .map(|(_, tet)| tet.vertices())
+            .collect::<Vec<_>>();
+        let walker = mesh.walker_from_tri([v(0), v(1), v(2)]).unwrap();
+
+        assert_eq!(
+            walker.progress_by_removing_tri(
+                &mut mesh,
+                |_| true,
+                |_| true,
+                5,
+                &mut vec![],
+                &mut vec![]
+            ),
+            None
+        );
+        assert_tets_ids(&mesh, tets);
+        assert_integrity(&mesh, true);
+    }
+
+    #[test]
+    fn test_progress_remove_tri_ghost_tri() {
+        // Successful removal of ghost tri.
+        let mut mesh = TetMesh::<(), ()>::delaunay_from_vertices(
+            vec![
+                (Pt3::new(1.0, 0.0, 0.0), ()),
+                (Pt3::new(-1.0, 1.0, 0.0), ()),
+                (Pt3::new(-1.0, -1.0, 0.0), ()),
+                (Pt3::new(-0.6, 0.0, 0.2), ()),
+                (Pt3::new(-0.6, 0.0, -0.2), ()),
+            ],
+            || (),
+        );
+        mesh.set_track_tri_map(true);
+        let tets = mesh
+            .tets()
+            .map(|(_, tet)| tet.vertices())
+            .collect::<Vec<_>>();
+
+        mesh.walker_from_edge([v(1), v(2)]).unwrap().flip32_unchecked(&mut mesh);
+
+        let walker = mesh
+            .walker_from_tri([v(3), v(4), TetMesh::<(), ()>::GHOST])
+            .unwrap();
+
+        assert_eq!(
+            walker.progress_by_removing_tri(
+                &mut mesh,
+                |_| true,
+                |_| true,
+                1,
+                &mut vec![],
+                &mut vec![]
+            ),
+            Some(0)
+        );
+        // Expect the Delaunay tetrahedralization
+        assert_tets_ids(&mesh, tets);
+        assert_integrity(&mesh, true);
+    }
 }
