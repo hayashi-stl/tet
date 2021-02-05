@@ -3512,4 +3512,116 @@ mod tests {
         );
         assert_integrity(&mesh, true);
     }
+
+    #[test]
+    fn test_progress_remove_tri_complex_low_depth() {
+        // Must remove an edge first, but depth is too low.
+
+        let mut mesh = TetMesh::<(), ()>::delaunay_from_vertices(
+            vec![
+                (Pt3::new(1.0, 0.0, 0.0), ()),
+                (Pt3::new(-1.0, 1.0, 0.0), ()),
+                (Pt3::new(-1.0, -1.0, 0.0), ()),
+                (Pt3::new(0.0, 0.0, 0.2), ()),
+                (Pt3::new(0.0, 0.0, -0.2), ()),
+            ],
+            || (),
+        );
+        mesh.set_track_tri_map(true);
+        let tets = mesh
+            .tets()
+            .map(|(_, tet)| tet.vertices())
+            .collect::<Vec<_>>();
+        let walker = mesh.walker_from_tri([v(0), v(3), v(4)]).unwrap();
+
+        assert_eq!(
+            walker.progress_by_removing_tri(
+                &mut mesh,
+                |_| true,
+                |_| true,
+                1,
+                &mut vec![],
+                &mut vec![]
+            ),
+            None
+        );
+        assert_tets_ids(&mesh, tets);
+        assert_integrity(&mesh, true);
+    }
+
+    #[test]
+    fn test_progress_remove_tri_complex() {
+        // Must remove an edge first.
+
+        let mut mesh = TetMesh::<(), ()>::delaunay_from_vertices(
+            vec![
+                (Pt3::new(1.0, 0.0, 0.0), ()),
+                (Pt3::new(-1.0, 1.0, 0.0), ()),
+                (Pt3::new(-1.0, -1.0, 0.0), ()),
+                (Pt3::new(0.0, 0.0, 0.2), ()),
+                (Pt3::new(0.0, 0.0, -0.2), ()),
+            ],
+            || (),
+        );
+        mesh.set_track_tri_map(true);
+        let walker = mesh.walker_from_tri([v(0), v(3), v(4)]).unwrap();
+
+        assert_eq!(
+            walker.progress_by_removing_tri(
+                &mut mesh,
+                |_| true,
+                |_| true,
+                2,
+                &mut vec![],
+                &mut vec![]
+            ),
+            Some(0)
+        );
+        assert_tets(&mesh, vec![
+            [0, 1, 2, 4],
+            [0, 2, 1, 3],
+            [0, 3, 1, u32::MAX],
+            [1, 3, 2, u32::MAX],
+            [2, 3, 0, u32::MAX],
+            [0, 4, 2, u32::MAX],
+            [2, 4, 1, u32::MAX],
+            [1, 4, 0, u32::MAX],
+        ]);
+        assert_integrity(&mesh, true);
+    }
+
+    #[test]
+    fn test_progress_remove_tri_concavity() {
+        let mut mesh = TetMesh::<(), ()>::delaunay_from_vertices(
+            vec![
+                (Pt3::new(1.0, 0.0, 0.0), ()),
+                (Pt3::new(-1.0, 1.0, 0.0), ()),
+                (Pt3::new(-1.0, -1.0, 0.0), ()),
+                (Pt3::new(-1.1, 0.0, 2.0), ()),
+                (Pt3::new(-1.1, 0.0, -2.0), ()),
+            ],
+            || (),
+        );
+        mesh.set_track_tri_map(true);
+        let tets = mesh
+            .tets()
+            .map(|(_, tet)| tet.vertices())
+            .collect::<Vec<_>>();
+        let walker = mesh.walker_from_tri([v(0), v(1), v(2)]).unwrap();
+
+        assert_eq!(
+            walker.progress_by_removing_tri(
+                &mut mesh,
+                |_| true,
+                |_| true,
+                5,
+                &mut vec![],
+                &mut vec![]
+            ),
+            None
+        );
+        assert_tets_ids(&mesh, tets);
+        assert_integrity(&mesh, true);
+    }
+
 }
