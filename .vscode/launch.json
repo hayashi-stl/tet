@@ -26,6 +26,47 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug unit tests in library 'tet' with printing",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "tet",
+                    "kind": "lib"
+                }
+            },
+            "args": ["--nocapture"],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug specific unit test in library 'tet' with printing",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=tet"
+                ],
+                "filter": {
+                    "name": "tet",
+                    "kind": "lib"
+                }
+            },
+            "args": [
+                "tet::tests::test_progress_remove_edge_44_low_depth",
+                "--nocapture"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug example 'delaunay_tets_plc'",
             "cargo": {
                 "args": [

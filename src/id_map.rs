@@ -1,4 +1,6 @@
 use fnv::FnvHashSet;
+use stable_vec::core::DefaultCore;
+use stable_vec::StableVec;
 use std::iter::Enumerate;
 use std::vec;
 use std::{
@@ -7,8 +9,6 @@ use std::{
     ops::{Index, IndexMut},
     slice,
 };
-use stable_vec::StableVec;
-use stable_vec::core::DefaultCore;
 
 pub type IdType = u32;
 
@@ -45,7 +45,10 @@ impl<K: Id, V> IdMap<K, V> {
 
     /// Gets the length of the map
     pub(crate) fn len(&self) -> usize {
-        debug_assert_eq!(self.map.num_elements(), self.map.next_push_index() - self.free.len());
+        debug_assert_eq!(
+            self.map.num_elements(),
+            self.map.next_push_index() - self.free.len()
+        );
         self.map.num_elements()
     }
 
@@ -56,8 +59,7 @@ impl<K: Id, V> IdMap<K, V> {
 
     /// Gets the value with a specific key mutably, if it exists.
     pub(crate) fn get_mut(&mut self, key: K) -> Option<&mut V> {
-        self.map
-            .get_mut(key.int() as usize)
+        self.map.get_mut(key.int() as usize)
     }
 
     /// Gets the value with a specific key, if it exists.
@@ -71,8 +73,7 @@ impl<K: Id, V> IdMap<K, V> {
     ///
     /// Safety: there must be value with this key.
     pub(crate) unsafe fn get_unchecked_mut(&mut self, key: K) -> &mut V {
-        self.map
-            .get_unchecked_mut(key.int() as usize)
+        self.map.get_unchecked_mut(key.int() as usize)
     }
 
     /// Inserts a value into the map and returns the key for that value.
@@ -91,14 +92,17 @@ impl<K: Id, V> IdMap<K, V> {
         let mut expanded = false;
         if key.int() as usize >= self.map.next_push_index() {
             // Create more space
-            self.free.extend(self.map.next_push_index() as IdType..key.int());
-            self.map.reserve(key.int() as usize + 1 - self.map.next_push_index());
+            self.free
+                .extend(self.map.next_push_index() as IdType..key.int());
+            self.map
+                .reserve(key.int() as usize + 1 - self.map.next_push_index());
             expanded = true;
         }
 
         let old = self.map.insert(key.int() as usize, value);
         if old.is_none() && !expanded {
-            self.free.remove(self.free.iter().position(|k| *k == key.int()).unwrap());
+            self.free
+                .remove(self.free.iter().position(|k| *k == key.int()).unwrap());
         }
         old
     }
@@ -118,9 +122,7 @@ impl<K: Id, V> IdMap<K, V> {
     /// Removes the value with a specific key and returns that value, if it existed.
     pub(crate) fn remove(&mut self, key: K) -> Option<V> {
         if (key.int() as usize) < self.map.capacity() {
-            let opt_value = self
-                .map
-                .remove(key.int() as usize);
+            let opt_value = self.map.remove(key.int() as usize);
 
             if opt_value.is_some() {
                 self.free.push(key.int());
