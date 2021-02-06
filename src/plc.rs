@@ -2,19 +2,17 @@ mod intersect;
 
 use crate::id_map::{self, IdMap};
 use crate::{
-    util::{CircularListIter, MapWith},
-    Pt1, Pt3, Vec1, Vec3, VertexId,
+    util::CircularListIter,
+    Pt1, Pt3, Vec3, VertexId,
 };
 
-use float_ord::FloatOrd;
-use fnv::{FnvHashMap, FnvHashSet};
-use iter::Map;
+use fnv::FnvHashMap;
 use nalgebra::Unit;
 use ncollide3d::partitioning::{BVH, BVT};
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::hash::Hash;
-use std::{cell::Cell, collections::hash_map::Entry, fmt::Debug, iter, ops::Index};
+use std::{collections::hash_map::Entry, fmt::Debug, iter, ops::Index};
 
 crate::id! {
     /// A PLC edge id
@@ -188,7 +186,7 @@ impl FaceRing {
                 |plc, fe| plc.face_edges[fe].next,
             )),
 
-            RingElement::Vertex(v) => FaceRingEdges::Single,
+            RingElement::Vertex(_) => FaceRingEdges::Single,
         }
     }
 }
@@ -938,6 +936,7 @@ pub type FaceIds<'a, F> = id_map::Keys<'a, FaceId, Face<F>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fnv::FnvHashSet;
     use pathfinding::directed::bfs;
 
     /// Assert all the invariants of this PLC structure. This does not include
@@ -1447,9 +1446,9 @@ mod tests {
     #[test]
     fn test_add_edge_all() {
         let mut plc = Plc::new(|| (), || (), || ());
-        let v = (0..3)
+        (0..3)
             .map(|_| plc.add_vertex(Pt3::origin(), ()))
-            .collect::<Vec<_>>();
+            .for_each(|_| {});
 
         e_ids(vec![[0, 1], [1, 0], [1, 2], [2, 1], [2, 0], [0, 2]])
             .into_iter()
@@ -1468,9 +1467,9 @@ mod tests {
     #[test]
     fn test_add_triangle() {
         let mut plc = Plc::new(|| (), || (), || 0);
-        let v = (0..4)
+        (0..4)
             .map(|_| plc.add_vertex(Pt3::origin(), ()))
-            .collect::<Vec<_>>();
+            .for_each(|_| {});
 
         // Triangle
         let id = plc.add_face(f_id(vec![vec![1, 2, 3]]), 3);

@@ -20,7 +20,7 @@ fn main() {
     });
 
     let now = std::time::Instant::now();
-    let mesh = TetMesh::<(), ()>::delaunay_from_vertices(data, || ());
+    let mesh = TetMesh::<(), ()>::delaunay_from_vertices(data, 0.0, || ());
     println!("Generated in {}ms", now.elapsed().as_millis());
     println!("Num tets including ghosts: {:?}", mesh.num_tets());
 }

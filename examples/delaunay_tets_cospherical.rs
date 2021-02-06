@@ -20,6 +20,6 @@ fn main() {
         .map(|vals| (Pt3::new(vals[0], vals[1], vals[2]), ()))
         .collect::<Vec<_>>();
 
-    let mesh = TetMesh::<(), ()>::delaunay_from_vertices(data, || ());
+    let mesh = TetMesh::<(), ()>::delaunay_from_vertices(data, 0.0, || ());
     println!("Num tets including ghosts: {:?}", mesh.num_tets());
 }

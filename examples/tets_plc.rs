@@ -30,6 +30,7 @@ fn main() {
 
         let mut tets = TetMesh::delaunay_from_vertices(
             plc.vertices().map(|(_, v)| (v.position(), *v.value())),
+            0.0015,
             || (),
         );
         tets.recover_and_lock_edges(&mut plc);

@@ -67,6 +67,29 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug example 'tets_plc' with specific arguments",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--example=tets_plc",
+                    "--package=tet",
+                    "--features",
+                    "obj"
+                ],
+                "filter": {
+                    "name": "tets_plc",
+                    "kind": "example"
+                }
+            },
+            "args": [
+                "ignore/ybg.obj",
+                "ignore/ybg_out.obj",
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug example 'delaunay_tets_plc'",
             "cargo": {
                 "args": [

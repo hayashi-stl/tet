@@ -19,7 +19,7 @@ use crate::{Pt3, Vec1, Vec3};
 use super::{EdgeId, Element, FaceId, Plc, Vertex, VertexId};
 
 fn point_in_face<V, E, F>(
-    plc: &Plc<V, E, F>,
+    _plc: &Plc<V, E, F>,
     point: Pt3,
     face: Vec<Vec<(VertexId, &Vertex<V>)>>,
     center: Pt3,

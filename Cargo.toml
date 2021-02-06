@@ -14,12 +14,13 @@ debug = true
 [dependencies]
 fnv = "1.0"
 nalgebra = "0.24"
-simplicity = "0.4"
+simplicity = "0.4.1"
 float-ord = "0.2"
 hilbert = "0.1.1"
 bitflags = "1.2.1"
 ncollide3d = "0.27.0"
 stable-vec = "0.4.0"
+robust-geo = "0.1.6"
 obj = { version = "0.10.2", optional = true }
 
 [dev-dependencies]

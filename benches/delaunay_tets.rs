@@ -23,7 +23,7 @@ fn delaunay_tets_random(c: &mut Criterion) {
 
     c.bench_function("delaunay_tets_random", |b| {
         b.iter_with_large_drop(|| {
-            TetMesh::<(), ()>::delaunay_from_vertices(data.iter().copied(), || ())
+            TetMesh::<(), ()>::delaunay_from_vertices(data.iter().copied(), 0.0, || ())
         })
     });
 }
@@ -38,7 +38,7 @@ fn delaunay_tets_cospherical(c: &mut Criterion) {
 
     c.bench_function("delaunay_tets_cospherical", |b| {
         b.iter_with_large_drop(|| {
-            TetMesh::<(), ()>::delaunay_from_vertices(data.iter().copied(), || ())
+            TetMesh::<(), ()>::delaunay_from_vertices(data.iter().copied(), 0.0, || ())
         })
     });
 }

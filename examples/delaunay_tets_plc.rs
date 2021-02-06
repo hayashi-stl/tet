@@ -30,6 +30,7 @@ fn main() {
 
         let tets = TetMesh::delaunay_from_vertices(
             plc.vertices().map(|(_, v)| (v.position(), *v.value())),
+            0.0,
             || (),
         );
 

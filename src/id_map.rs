@@ -1,13 +1,10 @@
-use fnv::FnvHashSet;
 use stable_vec::core::DefaultCore;
 use stable_vec::StableVec;
-use std::iter::Enumerate;
 use std::vec;
 use std::{
     iter::FromIterator,
     marker::PhantomData,
     ops::{Index, IndexMut},
-    slice,
 };
 
 pub type IdType = u32;
