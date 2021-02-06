@@ -64,6 +64,21 @@ fn even_sorted_3(mut arr: [VertexId; 3]) -> [VertexId; 3] {
     arr
 }
 
+fn even_sorted_4(mut arr: [VertexId; 4]) -> [VertexId; 4] {
+    if arr[3] < arr[0] && arr[3] < arr[1] && arr[3] < arr[2] {
+        arr.swap(0, 3);
+        arr.swap(1, 2);
+        let sub = [arr[1], arr[2], arr[3]];
+        arr[1..].copy_from_slice(&even_sorted_3(sub));
+    } else {
+        let sub = [arr[0], arr[1], arr[2]];
+        arr[..3].copy_from_slice(&even_sorted_3(sub));
+        let sub = [arr[1], arr[2], arr[3]];
+        arr[1..].copy_from_slice(&even_sorted_3(sub));
+    }
+    arr
+}
+
 /// Even-sorted list of 3 vertices
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
 struct TriVertices([VertexId; 3]);
@@ -254,9 +269,9 @@ impl Hash for BoundaryTri {
     }
 }
 
-/// An edge or triangle to remove.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RemoveGoal {
+/// An edge or triangle
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum EdgeOrTri {
     Edge([VertexId; 2]),
     Tri([VertexId; 3]),
 }
@@ -814,6 +829,43 @@ impl TetWalker {
         ]
     }
 
+    /// Performs a 2-to-3 flip on the mesh without checking whether
+    /// such a flip produces negative-volume tets, but does not flip away locked tris.
+    /// Returns walkers of the 3 tets created. Each walker's opposite edge is the new edge
+    /// and the first walker's current edge is the same as this walker's current edge.
+    pub fn flip23_unlocked<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>) -> Option<[TetWalker; 3]> {
+        let edge_flag = |edge| unsafe {
+            // Safety: tri.edge % 4 is in 0..4, and TetFlags::LOCKED_0.bits << i for i in 0..4 is a valid flag.
+            TetFlags::from_bits_unchecked(TetFlags::LOCKED_0.bits << edge % 4)
+        };
+
+        if mesh[self.id()].flags.get().intersects(edge_flag(self.edge)) {
+            None
+        } else {
+            Some(self.flip23_unchecked(mesh))
+        }
+    }
+
+    /// Performs a 2-to-3 flip on the mesh, but only if doing so improves the quality.
+    /// Returns walkers of the 3 tets created. Each walker's opposite edge is the new edge
+    /// and the first walker's current edge is the same as this walker's current edge.
+    pub fn flip23_quality<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>) -> Option<[TetWalker; 3]> {
+        let other = self.to_adj_ae(mesh);
+        let ([v1, v0, v2, v3], v4) = (self.tet(&mesh), other.fourth(&mesh));
+
+        let q0 = mesh.quality(v1, v0, v2, v3);
+        let q1 = mesh.quality(v0, v1, v2, v4);
+        let r0 = mesh.quality(v0, v1, v3, v4);
+        let r1 = mesh.quality(v1, v2, v3, v4);
+        let r2 = mesh.quality(v2, v0, v3, v4);
+
+        if r0.min(r1).min(r2) > q0.min(q1) {
+            self.flip23_unlocked(mesh)
+        } else {
+            None
+        }
+    }
+
     /// Performs a 3-to-2 flip on the mesh without checking whether
     /// such a flip produces negative-volume tets. Use at your own risk.
     /// Returns walkers for the 2 tets created by the flip. Each walker's opposite triangle is the new triangle.
@@ -926,6 +978,49 @@ impl TetWalker {
         [TetWalker::new(id0, 10), TetWalker::new(id1, 10)]
     }
 
+    /// Performs a 3-to-2 flip on the mesh without checking whether
+    /// such a flip produces negative-volume tets, but does not flip locked edges or tris.
+    /// This also checks that there are only 3 tets around the edge to flip away.
+    /// Returns walkers for the 2 tets created by the flip. Each walker's opposite triangle is the new triangle.
+    pub fn flip32_unlocked<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>) -> Option<[TetWalker; 2]> {
+        let edge_flag = |edge| unsafe {
+            // Safety: tri.edge % 4 is in 0..4, and TetFlags::LOCKED_0.bits << i for i in 0..4 is a valid flag.
+            TetFlags::from_bits_unchecked(TetFlags::LOCKED_0.bits << edge % 4)
+        };
+
+        let other1 = self.to_twin_edge().to_adj(&mesh);
+        let other2 = other1.to_twin_edge().to_adj(&mesh);
+        if mesh[self.id()].flags.get().intersects(edge_flag(self.edge)) ||
+            mesh[other1.id()].flags.get().intersects(edge_flag(other1.edge)) ||
+            mesh[other2.id()].flags.get().intersects(edge_flag(other2.edge)) ||
+            mesh.edges[self.undir_edge(mesh)].flags.get().intersects(UndirEdgeFlags::LOCKED) ||
+            self.to_twin_edge().to_adj(mesh).to_twin_edge().to_adj(mesh).to_twin_edge().to_adj(mesh) != self
+        {
+            None
+        } else {
+            Some(self.flip32_unchecked(mesh))
+        }
+    }
+
+    /// Performs a 3-to-2 flip on the mesh, but only if it improves the quality.
+    /// Returns walkers for the 2 tets created by the flip. Each walker's opposite triangle is the new triangle.
+    pub fn flip32_quality<V: Clone, T: Clone>(self, mesh: &mut TetMesh<V, T>) -> Option<[TetWalker; 2]> {
+        let other1 = self.to_twin_edge().to_adj(&mesh);
+        let ([v3, v4, v1, v0], v2) = (self.tet(&mesh), other1.fourth(&mesh));
+
+        let q0 = mesh.quality(v3, v4, v1, v0);
+        let q1 = mesh.quality(v3, v4, v0, v2);
+        let q2 = mesh.quality(v3, v4, v2, v1);
+        let r0 = mesh.quality(v0, v1, v2, v3);
+        let r1 = mesh.quality(v1, v0, v2, v4);
+
+        if r0.min(r1) > q0.min(q1).min(q2) {
+            self.flip32_unlocked(mesh)
+        } else {
+            None
+        }
+    }
+
     /// Attempts to remove this walker's edge to make progress towards removing something from `goals`.
     /// Returns the index in `goals` to the removed edge and a walker to the new tri if it succeeds or something from `goals` is removed.
     /// The vertices in `goals` must be sorted.
@@ -945,7 +1040,7 @@ impl TetWalker {
         edge_addable: EA,
         tri_addable: FA,
         depth: usize,
-        goals: &mut Vec<RemoveGoal>,
+        goals: &mut Vec<EdgeOrTri>,
         bad_edges: &mut Vec<[VertexId; 2]>,
     ) -> Option<usize> {
         if depth == 0
@@ -958,7 +1053,7 @@ impl TetWalker {
         }
 
         // Be sure to pop this goal before every return
-        goals.push(RemoveGoal::Edge(sorted_2(self.edge(mesh))));
+        goals.push(EdgeOrTri::Edge(sorted_2(self.edge(mesh))));
 
         // Don't use the walkers directly since they get invalidated after each flip.
         let edge = self.edge(mesh);
@@ -1088,9 +1183,9 @@ impl TetWalker {
                 .position(|g| {
                     [
                         *goals.last().unwrap(),
-                        RemoveGoal::Tri(sorted_3([v0, v3, v4])),
-                        RemoveGoal::Tri(sorted_3([v1, v3, v4])),
-                        RemoveGoal::Tri(sorted_3([v2, v3, v4])),
+                        EdgeOrTri::Tri(sorted_3([v0, v3, v4])),
+                        EdgeOrTri::Tri(sorted_3([v1, v3, v4])),
+                        EdgeOrTri::Tri(sorted_3([v2, v3, v4])),
                     ]
                     .contains(g)
                 })
@@ -1122,7 +1217,7 @@ impl TetWalker {
         edge_addable: EA,
         tri_addable: FA,
         depth: usize,
-        goals: &mut Vec<RemoveGoal>,
+        goals: &mut Vec<EdgeOrTri>,
         bad_edges: &mut Vec<[VertexId; 2]>,
     ) -> Option<usize> {
         if depth == 0 {
@@ -1142,7 +1237,7 @@ impl TetWalker {
         }
 
         // Be sure to pop this goal before every return
-        goals.push(RemoveGoal::Tri(sorted_3(self.tri(mesh))));
+        goals.push(EdgeOrTri::Tri(sorted_3(self.tri(mesh))));
 
         // Make sure there's no edge blocking the way.
         let adj = self.to_adj_ae(mesh);
@@ -1278,7 +1373,8 @@ impl TetWalker {
                 !mesh[adj.id()].flags.get().intersects(locked_edge_flag(adj.edge))
             };
 
-            if removal_safe && mesh.in_sphere(vs[0], vs[1], vs[2], vs[3], vertex) {
+            if removal_safe && (mesh.in_sphere(vs[0], vs[1], vs[2], vs[3], vertex) ||
+                (!convex && mesh.tet_close_to_vertex(vs[0], vs[1], vs[2], vs[3], vertex))) {
                 // Each tet should be visited at most once.
                 enclosed.push(adj.id());
 
@@ -1834,19 +1930,25 @@ impl<V, T> TetMesh<V, T> {
             != sim::orient_3d(self, Self::idx_ori, v0, v1, v2, v3)
     }
 
-    /// Checks whether these points are oriented positive and do not form a sliver.
-    pub fn non_sliver(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> bool {
+    /// Gets the quality of a tet, measured as smallest distance between two opposite simplexes.
+    pub fn quality(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> f64 {
         if [v0, v1, v2, v3].contains(&Self::GHOST) {
-            self.center.x.is_nan() ||
-                !sim::orient_3d(self, Self::idx_ori, v0, v1, v2, v3)
+            if self.center.x.is_nan() || !sim::orient_3d(self, Self::idx_ori, v0, v1, v2, v3) {
+                f64::INFINITY
+            } else {
+                -1.0
+            }
         } else {
+            // Make sure the number returned is the same given the same tet, no matter the (even) order of the vertices.
+            let [v0, v1, v2, v3] = even_sorted_4([v0, v1, v2, v3]);
+
             let p0 = self.idx_ori(v0);
             let p1 = self.idx_ori(v1);
             let p2 = self.idx_ori(v2);
             let p3 = self.idx_ori(v3);
             let volx6 = robust_geo::orient_3d(p0, p1, p2, p3);
             if volx6 <= 0.0 {
-                return false;
+                return -1.0;
             }
 
             //{
@@ -1869,8 +1971,13 @@ impl<V, T> TetMesh<V, T> {
                 [p0, p1, p2, p3], [p0, p2, p1, p3], [p0, p3, p1, p2]].iter().map(|[pa, pb, pc, pd]|
                     (pb - pa).cross(&(pd - pc)).norm())
                     .max_by_key(|area| FloatOrd(*area)).unwrap();
-            volx6 / max_area >= self.tolerance
+            volx6 / max_area
         }
+    }
+
+    /// Checks whether these points are oriented positive and do not form a sliver.
+    pub fn non_sliver(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> bool {
+        self.quality(v0, v1, v2, v3) >= self.tolerance
     }
 
     /// Gets whether the last point is in the circumsphere of the first 4 points.
@@ -1896,6 +2003,35 @@ impl<V, T> TetMesh<V, T> {
         } else {
             sim::in_sphere(self, Self::idx, v0, v1, v2, v3, v4)
         }
+    }
+
+    /// Gets whether the last point is close to the tet formed by the first 4 points using the tolerance.
+    /// The last point can't be the ghost vertex.
+    /// The tet must be oriented positive.
+    pub fn tet_close_to_vertex(
+        &self,
+        v0: VertexId,
+        v1: VertexId,
+        v2: VertexId,
+        v3: VertexId,
+        v4: VertexId,
+    ) -> bool {
+        let p0 = self.idx_ori(v0);
+        let p1 = self.idx_ori(v1);
+        let p2 = self.idx_ori(v2);
+        let p3 = self.idx_ori(v3);
+        let p4 = self.idx_ori(v4);
+        let ghost = [v0, v1, v2, v3].iter().position(|v| *v == Self::GHOST);
+
+        let d0 = ghost.filter(|g| *g != 0)
+            .map_or_else(|| (p2 - p3).cross(&(p1 - p3)).normalize().dot(&(p4 - p3)), |_| -f64::INFINITY);
+        let d1 = ghost.filter(|g| *g != 1)
+            .map_or_else(|| (p3 - p2).cross(&(p0 - p2)).normalize().dot(&(p4 - p2)), |_| -f64::INFINITY);
+        let d2 = ghost.filter(|g| *g != 2)
+            .map_or_else(|| (p0 - p1).cross(&(p3 - p1)).normalize().dot(&(p4 - p1)), |_| -f64::INFINITY);
+        let d3 = ghost.filter(|g| *g != 3)
+            .map_or_else(|| (p1 - p0).cross(&(p2 - p0)).normalize().dot(&(p4 - p0)), |_| -f64::INFINITY);
+        d0.max(d1).max(d2).max(d3) < self.tolerance
     }
 
     /// Gets whether the triangle formed by the first 3 points intersects the edge formed by the last 2 points.
@@ -2294,6 +2430,75 @@ impl<V, T> TetMesh<V, T> {
         id
     }
 
+    /// Improves the quality of the tet mesh with repeated flips.
+    pub fn flip_quality(&mut self) where V: Clone, T: Clone {
+        let mut to_flip = self.edges.values().map(|edge| EdgeOrTri::Edge(sorted_2(edge.vertices)))
+            .chain(self.tets.keys().flat_map(|id| vec![
+                TetWalker::new(id, 0),
+                TetWalker::new(id, 1),
+                TetWalker::new(id, 2),
+                TetWalker::new(id, 3),
+            ]).map(|w| w.tri(self))
+            .filter(|tri| even_sorted_3(*tri) == sorted_3(*tri))
+            .map(EdgeOrTri::Tri))
+            .collect::<VecDeque<_>>();
+        let mut flip_set = to_flip.iter().copied().collect::<FnvHashSet<_>>();
+        
+        while let Some(simplex) = to_flip.pop_front() {
+            flip_set.remove(&simplex);
+
+            match simplex {
+                EdgeOrTri::Edge(edge) => {
+                    if let Some(walker) = self.walker_from_edge(edge) {
+                        if let Some(walkers) = walker.flip32_quality(self) {
+                            for edge_or_tri in &[
+                                EdgeOrTri::Tri(sorted_3(walkers[0].tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[1].tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[0].to_nve().tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[1].to_nve().tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[0].to_pve().tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[1].to_pve().tri(self))),
+                                EdgeOrTri::Edge(sorted_2(walkers[0].edge(self))),
+                                EdgeOrTri::Edge(sorted_2(walkers[1].edge(self))),
+                                EdgeOrTri::Edge(sorted_2(walkers[0].to_nve().edge(self))),
+                                EdgeOrTri::Edge(sorted_2(walkers[1].to_nve().edge(self))),
+                                EdgeOrTri::Edge(sorted_2(walkers[0].to_pve().edge(self))),
+                                EdgeOrTri::Edge(sorted_2(walkers[1].to_pve().edge(self))),
+                            ] {
+                                if flip_set.insert(*edge_or_tri) {
+                                    to_flip.push_back(*edge_or_tri);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                EdgeOrTri::Tri(tri) => {
+                    // tri should be sorted.
+                    if let Some(walker) = self.tri_map.get(&TriVertices(tri)) {
+                        if let Some(walkers) = walker.flip23_quality(self) {
+                            for edge_or_tri in &[
+                                EdgeOrTri::Tri(sorted_3(walkers[0].tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[1].tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[2].tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[0].to_twin_edge().tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[1].to_twin_edge().tri(self))),
+                                EdgeOrTri::Tri(sorted_3(walkers[2].to_twin_edge().tri(self))),
+                                EdgeOrTri::Edge(sorted_2(walkers[0].edge(self))),
+                                EdgeOrTri::Edge(sorted_2(walkers[1].edge(self))),
+                                EdgeOrTri::Edge(sorted_2(walkers[2].edge(self))),
+                            ] {
+                                if flip_set.insert(*edge_or_tri) {
+                                    to_flip.push_back(*edge_or_tri);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Attempts to recover an edge
     /// and locks it to prevent it from flipping outside of unchecked flip functions.
     /// Returns whether it succeeded.
@@ -2397,14 +2602,10 @@ impl<V, T> TetMesh<V, T> {
             println!("Edges to recover: {}", to_recover.len());
 
             let mut num_steiner = 0;
+            let mut num_intersect = 0;
             curr_to_recover.append(&mut to_recover);
             for edge in curr_to_recover.drain(..) {
                 if self.walker_from_edge(edge).is_none() {
-                    // Add a Steiner point at the midpoint.
-                    let mid = Pt3::from((self[edge[0]].position().coords + self[edge[1]].position().coords) / 2.0);
-                    let steiner = self.vertices.insert(
-                        Vertex::new(TetWalker::new(TetId::invalid(), 0), mid, self[edge[0]].value().clone()));
-                    
                     // Look for an intersecting triangle from the vertex.
                     let start = self.walkers_from_vertex(edge[0])
                         .find(|walker| {
@@ -2414,7 +2615,7 @@ impl<V, T> TetMesh<V, T> {
 
                     // Look for all tets that intersect the edge.
                     let mut end = false;
-                    let mut search = iter::successors(Some(start), |walker| {
+                    let search = iter::successors(Some(start), |walker| {
                         let adj = walker.to_adj_ae(self);
                         if end {
                             None
@@ -2427,7 +2628,42 @@ impl<V, T> TetMesh<V, T> {
                                 self.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1])
                             }).unwrap())
                         }
-                    }).map(TetWalker::id).collect::<VecDeque<_>>();
+                    }).collect::<VecDeque<_>>();
+                    num_intersect += search.len() - 1;
+
+                    // Add a Steiner point at the midpoint.
+                    let mut search_iter = search.iter();
+                    search_iter.next_back(); // Don't include the last element
+
+                    //println!();
+                    let ep = [self[edge[0]].position(), self[edge[1]].position()];
+                    let mid = search_iter.map(|tet| {
+                        // Line-plane intersection
+                        let tri = tet.tri(self);
+                        let tp = [self[tri[0]].position(), self[tri[1]].position(), self[tri[2]].position()];
+
+                        let numer = -robust_geo::orient_3d(ep[0].coords, tp[1].coords, tp[2].coords, tp[0].coords);
+                        let denom = robust_geo::orient_3d(ep[1] - ep[0] + tp[0].coords, tp[1].coords, tp[2].coords, tp[0].coords);
+                        numer / denom
+                    })
+                    //.inspect(|(n, d)| {
+                    //    println!("{}/{}", n, d);
+                    //    let len = (ep[1] - ep[0]).norm();
+                    //    if len * n / d < self.tolerance || len * n / d > len - self.tolerance {
+                    //        self.export_debug_obj("ignore/debug_obj.obj").unwrap();
+                    //        panic!("Factor too close to 0 or 1, inserting in edge {}-{}, position {:?} to {:?}", edge[0], edge[1], ep[0], ep[1]);
+                    //    }
+                    //})
+                    .filter(|fac| *fac >= 0.0 && *fac <= 1.0)
+                    .min_by_key(|fac| FloatOrd((fac - 0.5).abs()))
+                    .map_or(((ep[0].coords + ep[1].coords) / 2.0).into(),
+                        |fac| ep[0] + (ep[1] - ep[0]) * fac);
+                    //let mid = Pt3::from((ep[0].coords + ep[1].coords) / 2.0);
+
+                    let steiner = self.vertices.insert(
+                        Vertex::new(TetWalker::new(TetId::invalid(), 0), mid, self[edge[0]].value().clone()));
+                    
+                    let mut search = search.into_iter().map(TetWalker::id).collect::<VecDeque<_>>();
 
                     let mut visited = FnvHashSet::default();
                     while let Some(tet) = search.pop_front() {
@@ -2454,6 +2690,7 @@ impl<V, T> TetMesh<V, T> {
                 }
             }
 
+            println!("{} intersection points", num_intersect);
             println!("Added {} Steiner vertices", num_steiner);
         }
     }
