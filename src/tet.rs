@@ -172,6 +172,11 @@ bitflags! {
         const LOCKED_1 = 1 << 9;
         const LOCKED_2 = 1 << 10;
         const LOCKED_3 = 1 << 11;
+        /// Part of the concave boundary extent in point_cavity
+        const BOUND_LIMIT_0 = 1 << 12;
+        const BOUND_LIMIT_1 = 1 << 13;
+        const BOUND_LIMIT_2 = 1 << 14;
+        const BOUND_LIMIT_3 = 1 << 15;
     }
 }
 
@@ -1221,6 +1226,14 @@ impl TetWalker {
             // Safety: tri.edge % 4 is in 0..4, and TetFlags::BOUND_IMM_0.bits << i for i in 0..4 is a valid flag.
             TetFlags::from_bits_unchecked(TetFlags::BOUND_IMM_0.bits << edge % 4)
         };
+        let limit_edge_flag = |edge| unsafe {
+            // Safety: tri.edge % 4 is in 0..4, and TetFlags::BOUND_LIMIT_0.bits << i for i in 0..4 is a valid flag.
+            TetFlags::from_bits_unchecked(TetFlags::BOUND_LIMIT_0.bits << edge % 4)
+        };
+        let locked_edge_flag = |edge| unsafe {
+            // Safety: tri.edge % 4 is in 0..4, and TetFlags::LOCKED_0.bits << i for i in 0..4 is a valid flag.
+            TetFlags::from_bits_unchecked(TetFlags::LOCKED_0.bits << edge % 4)
+        };
 
         // Extend intermediate boundary
         while let Some(tri) = bound_imm.pop_front() {
@@ -1234,7 +1247,38 @@ impl TetWalker {
 
             let adj = tri.to_adj_ae(mesh);
             let vs = adj.tet(mesh);
-            if mesh.in_sphere(vs[0], vs[1], vs[2], vs[3], vertex) {
+
+            // Check that no edge that will be removed is locked
+            let removal_safe = if convex {
+                true
+            } else {
+                let walk0 = adj.to_perm(Permutation::_3210).to_adj_ae(mesh);
+                let flags0 = &mesh.tets[walk0.id()].flags;
+                let walk1 = adj.to_opp_edge().to_adj_ae(mesh);
+                let flags1 = &mesh.tets[walk1.id()].flags;
+                let walk2 = adj.to_twin_edge().to_adj_ae(mesh);
+                let flags2 = &mesh.tets[walk2.id()].flags;
+
+                let rm0 = flags0.get().intersects(imm_edge_flag(walk0.edge));
+                let rm1 = flags1.get().intersects(imm_edge_flag(walk1.edge));
+                let rm2 = flags2.get().intersects(imm_edge_flag(walk2.edge));
+                
+                // Don't extend past the limit
+                !flags0.get().intersects(limit_edge_flag(walk0.edge)) &&
+                !flags1.get().intersects(limit_edge_flag(walk1.edge)) &&
+                !flags2.get().intersects(limit_edge_flag(walk2.edge)) &&
+                // Make sure edges are removable
+                (!rm0 || !mesh.edges[adj.to_perm(Permutation::_1203).undir_edge(mesh)].flags.get().intersects(UndirEdgeFlags::LOCKED)) &&
+                (!rm1 || !mesh.edges[adj.to_perm(Permutation::_2013).undir_edge(mesh)].flags.get().intersects(UndirEdgeFlags::LOCKED)) &&
+                (!rm2 || !mesh.edges[adj.to_perm(Permutation::_0123).undir_edge(mesh)].flags.get().intersects(UndirEdgeFlags::LOCKED)) &&
+                (!rm0 || !rm1 || !mesh.edges[adj.to_perm(Permutation::_2301).undir_edge(mesh)].flags.get().intersects(UndirEdgeFlags::LOCKED)) &&
+                (!rm1 || !rm2 || !mesh.edges[adj.to_perm(Permutation::_0312).undir_edge(mesh)].flags.get().intersects(UndirEdgeFlags::LOCKED)) &&
+                (!rm2 || !rm0 || !mesh.edges[adj.to_perm(Permutation::_1320).undir_edge(mesh)].flags.get().intersects(UndirEdgeFlags::LOCKED)) &&
+                // Make sure tri is removable
+                !mesh[adj.id()].flags.get().intersects(locked_edge_flag(adj.edge))
+            };
+
+            if removal_safe && mesh.in_sphere(vs[0], vs[1], vs[2], vs[3], vertex) {
                 // Each tet should be visited at most once.
                 enclosed.push(adj.id());
 
@@ -1246,7 +1290,7 @@ impl TetWalker {
                 ]
                 .iter()
                 {
-                    let twin = walker.to_adj_ae(&mesh);
+                    let twin = walker.to_adj_ae(mesh);
                     if mesh.tets[twin.id()]
                         .flags
                         .get()
@@ -1261,6 +1305,10 @@ impl TetWalker {
             } else {
                 // Reached edge of boundary
                 boundary.push(tri);
+                if !convex {
+                    // Mark so the expansion doesn't try to gobble this up.
+                    mesh.tets[tri.id()].set_flags(limit_edge_flag(tri.edge));
+                }
             }
         }
 
@@ -1269,6 +1317,7 @@ impl TetWalker {
             for walker in boundary.drain(..) {
                 bound_imm.push_back(walker);
                 mesh.tets[walker.id()].set_flags(imm_edge_flag(walker.edge));
+                mesh.tets[walker.id()].clear_flags(limit_edge_flag(walker.edge));
             }
 
             while let Some(tri) = bound_imm.pop_front() {
@@ -1866,6 +1915,22 @@ impl<V, T> TetMesh<V, T> {
         self.orient_3d(v2, v0, v3, v4) == positive
     }
 
+    /// Gets whether the last point is in the tet first 4 points.
+    /// The tet must be oriented positive.
+    pub fn tet_intersects_vertex(
+        &self,
+        v0: VertexId,
+        v1: VertexId,
+        v2: VertexId,
+        v3: VertexId,
+        v4: VertexId,
+    ) -> bool {
+        self.orient_3d(v0, v1, v2, v4) &&
+        self.orient_3d(v3, v2, v1, v4) &&
+        self.orient_3d(v2, v3, v0, v4) &&
+        self.orient_3d(v1, v0, v3, v4)
+    }
+
     /// Flips in a vertex using one big mega flip.
     /// The boundary must be manifold.
     /// For now, no vertex can be completely enclosed.
@@ -2319,18 +2384,77 @@ impl<V, T> TetMesh<V, T> {
 
         let mut to_recover = plc_edges.into_iter().collect::<Vec<_>>();
         let mut curr_to_recover = vec![];
-        for depth in &[1, 2, 4, 8] {
-            curr_to_recover.append(&mut to_recover);
-            for edge in curr_to_recover.drain(..) {
-                if !self.recover_and_lock_edge(edge, *depth) {
-                    to_recover.push(edge);
+        while !to_recover.is_empty() {
+            for depth in &[1, 2, 4, 8] {
+                curr_to_recover.append(&mut to_recover);
+                for edge in curr_to_recover.drain(..) {
+                    if !self.recover_and_lock_edge(edge, *depth) {
+                        to_recover.push(edge);
+                    }
                 }
             }
-        }
 
-        println!("Edges to recover: {}", to_recover.len());
-        for edge in to_recover {
-            println!("    Edge {}-{}", edge[0], edge[1]);
+            println!("Edges to recover: {}", to_recover.len());
+
+            let mut num_steiner = 0;
+            curr_to_recover.append(&mut to_recover);
+            for edge in curr_to_recover.drain(..) {
+                if self.walker_from_edge(edge).is_none() {
+                    // Add a Steiner point at the midpoint.
+                    let mid = Pt3::from((self[edge[0]].position().coords + self[edge[1]].position().coords) / 2.0);
+                    let steiner = self.vertices.insert(
+                        Vertex::new(TetWalker::new(TetId::invalid(), 0), mid, self[edge[0]].value().clone()));
+                    
+                    // Look for an intersecting triangle from the vertex.
+                    let start = self.walkers_from_vertex(edge[0])
+                        .find(|walker| {
+                            let opp = walker.opp_tri(self);
+                            self.tri_intersects_edge(opp[0], opp[1], opp[2], edge[0], edge[1])
+                        }).unwrap().to_perm(Permutation::_3210);
+
+                    // Look for all tets that intersect the edge.
+                    let mut end = false;
+                    let mut search = iter::successors(Some(start), |walker| {
+                        let adj = walker.to_adj_ae(self);
+                        if end {
+                            None
+                        } else if adj.fourth(self) == edge[1] {
+                            end = true;
+                            Some(adj)
+                        } else {
+                            Some(*[adj.to_twin_edge(), adj.to_opp_edge(), adj.to_perm(Permutation::_3210)].iter().find(|walker| {
+                                let tri = walker.tri(self);
+                                self.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1])
+                            }).unwrap())
+                        }
+                    }).map(TetWalker::id).collect::<VecDeque<_>>();
+
+                    let mut visited = FnvHashSet::default();
+                    while let Some(tet) = search.pop_front() {
+                        if visited.insert(tet) {
+                            let vs = self[tet].vertices();
+                            let walker = self.walker_from_tet(tet);
+                            if self.tet_intersects_vertex(vs[0], vs[1], vs[2], vs[3], steiner) {
+                                let (mut boundary, enclosure) = walker.point_cavity(self, false, steiner);
+                                self.flip_in_vertex_unchecked(steiner, &mut boundary, &enclosure);
+                                to_recover.push([edge[0], steiner]);
+                                to_recover.push([steiner, edge[1]]);
+                                num_steiner += 1;
+                                break;
+                            } else {
+                                search.push_back(walker.to_adj_ae(self).id());
+                                search.push_back(walker.to_twin_edge().to_adj_ae(self).id());
+                                search.push_back(walker.to_opp_edge().to_adj_ae(self).id());
+                                search.push_back(walker.to_perm(Permutation::_3210).to_adj_ae(self).id());
+                            }
+                        }
+
+                        assert!(!search.is_empty(), "Adding Steiner point {} in edge {}-{} failed", steiner, edge[0], edge[1]);
+                    }
+                }
+            }
+
+            println!("Added {} Steiner vertices", num_steiner);
         }
     }
 
