@@ -1165,7 +1165,7 @@ impl TetWalker {
         // Concavity => try to remove a triangle.
         // If it can be removed, so can the edge.
         let test = if allow_slivers {
-            !mesh.orient_3d(v0, v1, v3, v2) || !mesh.orient_3d(v0, v1, v2, v4)
+            !mesh.orient_3d_sim(v0, v1, v3, v2) || !mesh.orient_3d_sim(v0, v1, v2, v4)
         } else {
             !mesh.non_sliver(v0, v1, v3, v2) || !mesh.non_sliver(v0, v1, v2, v4)
         };
@@ -1292,7 +1292,7 @@ impl TetWalker {
             (v2, v0, self.to_pfe()),
         ] {
             let test = if allow_slivers {
-                !mesh.orient_3d(*va, *vb, v4, v3)
+                !mesh.orient_3d_sim(*va, *vb, v4, v3)
             } else {
                 !mesh.non_sliver(*va, *vb, v4, v3)
             };
@@ -1422,8 +1422,16 @@ impl TetWalker {
                 !mesh[adj.id()].flags.get().intersects(locked_edge_flag(adj.edge))
             };
 
-            if removal_safe && (mesh.in_sphere_sim(vs[0], vs[1], vs[2], vs[3], vertex) ||
-                (!convex && mesh.tet_close_to_vertex(vs[0], vs[1], vs[2], vs[3], vertex))) {
+            let mut in_sphere = mesh.in_sphere(vs[0], vs[1], vs[2], vs[3], vertex);
+            if in_sphere == 0.0 {
+                if let Some(i) = mesh[adj.id()].vertices().iter().position(|v| *v == TetMesh::<(), ()>::GHOST) {
+                    // Coplanar to solid triangle of ghost tet; check adjacent tet
+                    let vs = adj.to_edge(i as u32).to_adj_ae(mesh).tet(mesh);
+                    in_sphere = mesh.in_sphere(vs[0], vs[1], vs[2], vs[3], vertex);
+                }
+            }
+            if removal_safe && (in_sphere >= 0.0
+                /*|| (!convex && mesh.tet_close_to_vertex(vs[0], vs[1], vs[2], vs[3], vertex))*/) {
                 // Each tet should be visited at most once.
                 enclosed.push(adj.id());
 
@@ -1466,13 +1474,14 @@ impl TetWalker {
             }
 
             while let Some(tri) = bound_imm.pop_front() {
+                println!("Bound imm: {:?}", bound_imm.iter().map(|w| w.tet(mesh)).collect::<Vec<_>>());
                 if !mesh.tets[tri.id()].flags.get().intersects(imm_edge_flag(tri.edge)) {
                     // Triangle was removed by twin triangle.
                     continue;
                 }
 
                 let vs = tri.tri(mesh);
-                if mesh.orient_3d(vs[0], vs[1], vs[2], vertex) {
+                if mesh.orient_3d(vs[0], vs[1], vs[2], vertex) > 0.0 {
                     boundary.push(tri);
                 } else {
                     // Remove from cavity
@@ -1979,9 +1988,19 @@ impl<V, T> TetMesh<V, T> {
     }
 
     /// Gets whether these points are oriented positive.
+    /// Any vertex is allowed to be the ghost vertex and this should just work™.
+    pub fn orient_3d(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> f64 {
+        let p0 = self.idx_ori(v0);
+        let p1 = self.idx_ori(v1);
+        let p2 = self.idx_ori(v2);
+        let p3 = self.idx_ori(v3);
+        (if [v0, v1, v2, v3].contains(&Self::GHOST) {-1.0} else {1.0}) * robust_geo::orient_3d(p0, p1, p2, p3)
+    }
+
+    /// Gets whether these points are oriented positive.
     /// Uses simulation of simplicity to avoid ties.
     /// Any vertex is allowed to be the ghost vertex and this should just work™.
-    pub fn orient_3d(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> bool {
+    pub fn orient_3d_sim(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> bool {
         [v0, v1, v2, v3].contains(&Self::GHOST)
             != sim::orient_3d(self, Self::idx_ori, v0, v1, v2, v3)
     }
@@ -2070,26 +2089,26 @@ impl<V, T> TetMesh<V, T> {
     /// Uses simulation of simplicity to avoid ties.
     /// [v0, v1, v2, v3] must have positive orientation.
     /// Assumes that none of the points equal and that the last point isn't the ghost vertex.
-    pub fn in_sphere_sim(
-        &self,
-        v0: VertexId,
-        v1: VertexId,
-        v2: VertexId,
-        v3: VertexId,
-        v4: VertexId,
-    ) -> bool {
-        if v0 == Self::GHOST {
-            sim::orient_3d(self, Self::idx, v3, v2, v1, v4)
-        } else if v1 == Self::GHOST {
-            sim::orient_3d(self, Self::idx, v2, v3, v0, v4)
-        } else if v2 == Self::GHOST {
-            sim::orient_3d(self, Self::idx, v1, v0, v3, v4)
-        } else if v3 == Self::GHOST {
-            sim::orient_3d(self, Self::idx, v0, v1, v2, v4)
-        } else {
-            sim::in_sphere(self, Self::idx, v0, v1, v2, v3, v4)
-        }
-    }
+    //pub fn in_sphere_sim(
+    //    &self,
+    //    v0: VertexId,
+    //    v1: VertexId,
+    //    v2: VertexId,
+    //    v3: VertexId,
+    //    v4: VertexId,
+    //) -> bool {
+    //    if v0 == Self::GHOST {
+    //        sim::orient_3d(self, Self::idx, v3, v2, v1, v4)
+    //    } else if v1 == Self::GHOST {
+    //        sim::orient_3d(self, Self::idx, v2, v3, v0, v4)
+    //    } else if v2 == Self::GHOST {
+    //        sim::orient_3d(self, Self::idx, v1, v0, v3, v4)
+    //    } else if v3 == Self::GHOST {
+    //        sim::orient_3d(self, Self::idx, v0, v1, v2, v4)
+    //    } else {
+    //        sim::in_sphere(self, Self::idx, v0, v1, v2, v3, v4)
+    //    }
+    //}
 
     /// Gets whether the last point is close to the tet formed by the first 4 points using the tolerance.
     /// The last point can't be the ghost vertex.
@@ -2130,11 +2149,11 @@ impl<V, T> TetMesh<V, T> {
         v3: VertexId,
         v4: VertexId,
     ) -> bool {
-        let positive = self.orient_3d(v2, v1, v0, v3);
-        self.orient_3d(v0, v1, v2, v4) == positive &&
-        self.orient_3d(v0, v1, v3, v4) == positive &&
-        self.orient_3d(v1, v2, v3, v4) == positive &&
-        self.orient_3d(v2, v0, v3, v4) == positive
+        let positive = self.orient_3d_sim(v2, v1, v0, v3);
+        self.orient_3d_sim(v0, v1, v2, v4) == positive &&
+        self.orient_3d_sim(v0, v1, v3, v4) == positive &&
+        self.orient_3d_sim(v1, v2, v3, v4) == positive &&
+        self.orient_3d_sim(v2, v0, v3, v4) == positive
     }
 
     /// Gets whether the last point is in the tet first 4 points.
@@ -2147,10 +2166,10 @@ impl<V, T> TetMesh<V, T> {
         v3: VertexId,
         v4: VertexId,
     ) -> bool {
-        self.orient_3d(v0, v1, v2, v4) &&
-        self.orient_3d(v3, v2, v1, v4) &&
-        self.orient_3d(v2, v3, v0, v4) &&
-        self.orient_3d(v1, v0, v3, v4)
+        self.orient_3d_sim(v0, v1, v2, v4) &&
+        self.orient_3d_sim(v3, v2, v1, v4) &&
+        self.orient_3d_sim(v2, v3, v0, v4) &&
+        self.orient_3d_sim(v1, v0, v3, v4)
     }
 
     /// Flips in a vertex using one big mega flip.
@@ -2404,6 +2423,8 @@ impl<V, T> TetMesh<V, T> {
         }
 
         mesh.center = (center_sum / weight_sum).into();
+        //println!("Num slivers: {}", slivers.len());
+        mesh.assert_integrity(true);
 
         mesh
     }
@@ -2451,7 +2472,7 @@ impl<V, T> TetMesh<V, T> {
         let lucky_tet = self[closest].tet.id();
         let not_delaunay = if {
             let vs = self[lucky_tet].vertices;
-            self.in_sphere_sim(vs[0], vs[1], vs[2], vs[3], id)
+            self.in_sphere(vs[0], vs[1], vs[2], vs[3], id) > 0.0
         } {
             lucky_tet
         } else {
@@ -2473,7 +2494,7 @@ impl<V, T> TetMesh<V, T> {
             unsafe {
                 self.vertex_tets_opt(closest).find(|tet| {
                     let vs = self[*tet].vertices();
-                    self.in_sphere_sim(vs[0], vs[1], vs[2], vs[3], id)
+                    self.in_sphere(vs[0], vs[1], vs[2], vs[3], id) > 0.0
                 })
             }
             .unwrap_or_else(|| {
@@ -2491,7 +2512,7 @@ impl<V, T> TetMesh<V, T> {
                 while let Some(tet) = tets.pop_front() {
                     if checked.insert(tet) {
                         let vs = self[tet].vertices();
-                        if self.in_sphere_sim(vs[0], vs[1], vs[2], vs[3], id) {
+                        if self.in_sphere(vs[0], vs[1], vs[2], vs[3], id) > 0.0 {
                             return tet;
                         }
                     }
@@ -2832,8 +2853,6 @@ impl<V, T> TetMesh<V, T> {
         // Needed for the edge and tri removal functions.
         self.set_track_tri_map(true);
 
-        self.remove_slivers();
-
         let mut plc_edges = plc
             .edges()
             .map(|(_, edge)| sorted_2(edge.vertices()))
@@ -2998,8 +3017,8 @@ impl<V, T> TetMesh<V, T> {
             if orient_test {
                 let vs = tet.vertices();
                 assert!(
-                    self.orient_3d(vs[0], vs[1], vs[2], vs[3]),
-                    "Tet {} (vertices {} {} {} {}) is oriented negative.",
+                    self.orient_3d(vs[0], vs[1], vs[2], vs[3]) > 0.0,
+                    "Tet {} (vertices {} {} {} {}) is oriented zero or negative.",
                     id,
                     vs[0],
                     vs[1],
@@ -3858,10 +3877,10 @@ mod tests {
             (),
         ));
 
-        assert!(mesh.in_sphere_sim(TetMesh::<(), ()>::GHOST, v(1), v(2), v(3), v(4)));
-        assert!(!mesh.in_sphere_sim(v(0), TetMesh::<(), ()>::GHOST, v(2), v(3), v(4)));
-        assert!(!mesh.in_sphere_sim(v(0), v(1), TetMesh::<(), ()>::GHOST, v(3), v(4)));
-        assert!(!mesh.in_sphere_sim(v(0), v(1), v(2), TetMesh::<(), ()>::GHOST, v(4)));
+        assert!(mesh.in_sphere(TetMesh::<(), ()>::GHOST, v(1), v(2), v(3), v(4)) > 0.0);
+        assert!(mesh.in_sphere(v(0), TetMesh::<(), ()>::GHOST, v(2), v(3), v(4)) < 0.0);
+        assert!(mesh.in_sphere(v(0), v(1), TetMesh::<(), ()>::GHOST, v(3), v(4)) < 0.0);
+        assert!(mesh.in_sphere(v(0), v(1), v(2), TetMesh::<(), ()>::GHOST, v(4)) < 0.0);
     }
 
     #[test]
@@ -3873,7 +3892,7 @@ mod tests {
             (),
         ));
 
-        assert!(mesh.in_sphere_sim(v(0), v(1), v(3), v(2), v(4)));
+        assert!(mesh.in_sphere(v(0), v(1), v(3), v(2), v(4)) > 0.0);
     }
 
     #[test]

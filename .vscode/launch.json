@@ -82,8 +82,8 @@
                 }
             },
             "args": [
-                "ignore/gear.obj",
-                "ignore/gear_out.obj",
+                "ignore/delaunay_test.obj",
+                "ignore/delaunay_test_out.obj",
             ],
             "cwd": "${workspaceFolder}"
         },
