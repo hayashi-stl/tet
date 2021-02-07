@@ -82,8 +82,8 @@
                 }
             },
             "args": [
-                "ignore/ybg.obj",
-                "ignore/ybg_out.obj",
+                "ignore/gear.obj",
+                "ignore/gear_out.obj",
             ],
             "cwd": "${workspaceFolder}"
         },

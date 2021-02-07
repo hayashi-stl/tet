@@ -276,6 +276,15 @@ enum EdgeOrTri {
     Tri([VertexId; 3]),
 }
 
+/// The type of sliver, either a triangle and a vertex or 2 edges are too close to each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SliverKind {
+    /// Tet walker on an offending edge.
+    EdgeEdge(TetWalker),
+    /// Tet walker on the offending triangle.
+    TriVertex(TetWalker),
+}
+
 const fn permutation_arr(inv: bool) -> [[u32; 12]; 12] {
     let mut arr = [[0; 12]; 12];
     let perms = [
@@ -609,6 +618,34 @@ impl TetWalker {
             1 => self.to_nfe(),
             2 => self.to_pfe(),
             _ => unreachable!(),
+        }
+    }
+
+    /// Assumes this walker is on a sliver tet and gets the kind of sliver it's on.
+    fn sliver_kind<V, T>(self, mesh: &mut TetMesh<V, T>) -> SliverKind {
+        let p0 = mesh.vertices[self.first(mesh)].position();
+        let p1 = mesh.vertices[self.second(mesh)].position();
+        let p2 = mesh.vertices[self.third(mesh)].position();
+        let p3 = mesh.vertices[self.fourth(mesh)].position();
+
+        let t0 = (p2 - p3).cross(&(p1 - p3)).norm();
+        let t1 = (p3 - p2).cross(&(p0 - p2)).norm();
+        let t2 = (p0 - p1).cross(&(p3 - p1)).norm();
+        let t3 = (p1 - p0).cross(&(p2 - p0)).norm();
+        let e03 = (p0 - p3).cross(&(p1 - p2)).norm();
+        let e13 = (p1 - p3).cross(&(p2 - p0)).norm();
+        let e23 = (p2 - p3).cross(&(p0 - p1)).norm();
+        let max = t0.max(t1).max(t2).max(t3).max(e03).max(e13).max(e23);
+
+        match max {
+            _ if max == t0 => SliverKind::TriVertex(self.to_perm(Permutation::_3210)),
+            _ if max == t1 => SliverKind::TriVertex(self.to_opp_edge()),
+            _ if max == t2 => SliverKind::TriVertex(self.to_twin_edge()),
+            _ if max == t3 => SliverKind::TriVertex(self),
+            _ if max == e03 => SliverKind::EdgeEdge(self.to_pve()),
+            _ if max == e13 => SliverKind::EdgeEdge(self.to_nve()),
+            _ if max == e23 => SliverKind::EdgeEdge(self),
+            _ => unreachable!()
         }
     }
 
@@ -1040,6 +1077,7 @@ impl TetWalker {
         edge_addable: EA,
         tri_addable: FA,
         depth: usize,
+        allow_slivers: bool,
         goals: &mut Vec<EdgeOrTri>,
         bad_edges: &mut Vec<[VertexId; 2]>,
     ) -> Option<usize> {
@@ -1082,6 +1120,7 @@ impl TetWalker {
                         edge_addable.clone(),
                         tri_addable.clone(),
                         depth - 1,
+                        allow_slivers,
                         goals,
                         bad_edges,
                     );
@@ -1115,10 +1154,7 @@ impl TetWalker {
         };
 
         // Edge hasn't been removed yet, and there are 3 triangles around the edge, so this should work.
-        let walk_0 = tri_opps
-            .pop()
-            .and_then(|v2| mesh.tri_map.get(&TriVertices::new([edge[0], edge[1], v2])))
-            .unwrap()
+        let walk_0 = mesh.tri_map[&TriVertices::new([edge[0], edge[1], *tri_opps.last().unwrap()])]
             .to_edge_assuming_tri(mesh, edge);
         let walk_1 = walk_0.to_twin_edge().to_adj(mesh);
         let walk_2 = walk_1.to_twin_edge().to_adj(mesh);
@@ -1128,7 +1164,12 @@ impl TetWalker {
 
         // Concavity => try to remove a triangle.
         // If it can be removed, so can the edge.
-        if mesh.orient_3d(v0, v1, v2, v3) || mesh.orient_3d(v0, v1, v4, v2) {
+        let test = if allow_slivers {
+            !mesh.orient_3d(v0, v1, v3, v2) || !mesh.orient_3d(v0, v1, v2, v4)
+        } else {
+            !mesh.non_sliver(v0, v1, v3, v2) || !mesh.non_sliver(v0, v1, v2, v4)
+        };
+        if test {
             for v in &[v0, v1, v2] {
                 // Walker should exist if previous flip didn't work.
                 let walker = mesh.tri_map[&TriVertices::new([edge[0], edge[1], *v])]
@@ -1141,6 +1182,7 @@ impl TetWalker {
                     edge_addable.clone(),
                     tri_addable.clone(),
                     depth - 1,
+                    allow_slivers,
                     goals,
                     bad_edges,
                 );
@@ -1217,6 +1259,7 @@ impl TetWalker {
         edge_addable: EA,
         tri_addable: FA,
         depth: usize,
+        allow_slivers: bool,
         goals: &mut Vec<EdgeOrTri>,
         bad_edges: &mut Vec<[VertexId; 2]>,
     ) -> Option<usize> {
@@ -1248,12 +1291,18 @@ impl TetWalker {
             (v1, v2, self.to_nfe()),
             (v2, v0, self.to_pfe()),
         ] {
-            if mesh.orient_3d(*va, *vb, v3, v4) {
+            let test = if allow_slivers {
+                !mesh.orient_3d(*va, *vb, v4, v3)
+            } else {
+                !mesh.non_sliver(*va, *vb, v4, v3)
+            };
+            if test {
                 let index = walker.progress_by_removing_edge(
                     mesh,
                     edge_addable,
                     tri_addable,
                     depth - 1,
+                    allow_slivers,
                     goals,
                     bad_edges,
                 );
@@ -1373,7 +1422,7 @@ impl TetWalker {
                 !mesh[adj.id()].flags.get().intersects(locked_edge_flag(adj.edge))
             };
 
-            if removal_safe && (mesh.in_sphere(vs[0], vs[1], vs[2], vs[3], vertex) ||
+            if removal_safe && (mesh.in_sphere_sim(vs[0], vs[1], vs[2], vs[3], vertex) ||
                 (!convex && mesh.tet_close_to_vertex(vs[0], vs[1], vs[2], vs[3], vertex))) {
                 // Each tet should be visited at most once.
                 enclosed.push(adj.id());
@@ -1560,12 +1609,13 @@ impl<V, T> TetMesh<V, T> {
         tets
     }
 
-    fn with_ids(&mut self, vertices: [(VertexId, Pt3, V); 4], default_tet: fn() -> T)
+    fn with_ids(&mut self, mut vertices: [(VertexId, Pt3, V); 4], default_tet: fn() -> T)
     where
         V: Clone,
         T: Clone,
     {
         // Make sure the tet is oriented positive
+        vertices.sort_by_key(|(id, _, _)| *id);
         let swap = !sim::orient_3d(&vertices, |l, i| l[i].1.coords, 0, 1, 2, 3);
 
         let tw = |id, edge| TetWalker::new(TetId(id), edge);
@@ -1785,9 +1835,15 @@ impl<V, T> TetMesh<V, T> {
         }
     }
 
+    /// Gets a tet walker at the given tetrahedron, if one exists.
+    /// The first vertex must be a solid vertex.
+    pub fn walker_from_tet(&self, tet: [VertexId; 4]) -> Option<TetWalker> {
+        self.walker_from_tri([tet[0], tet[1], tet[2]]).filter(|w| w.fourth(self) == tet[3])
+    }
+
     /// Gets a canonicalized tet walker that starts at the given tet.
     /// The tet must exist
-    pub fn walker_from_tet(&self, tet: TetId) -> TetWalker {
+    pub fn walker_from_tet_id(&self, tet: TetId) -> TetWalker {
         TetWalker::new(tet, 3)
     }
 
@@ -1981,10 +2037,40 @@ impl<V, T> TetMesh<V, T> {
     }
 
     /// Gets whether the last point is in the circumsphere of the first 4 points.
-    /// Uses simulation of simplicity to avoid ties.
+    /// Returns 0 in case of a tie.
     /// [v0, v1, v2, v3] must have positive orientation.
     /// Assumes that none of the points equal and that the last point isn't the ghost vertex.
     pub fn in_sphere(
+        &self,
+        v0: VertexId,
+        v1: VertexId,
+        v2: VertexId,
+        v3: VertexId,
+        v4: VertexId,
+    ) -> f64 {
+        let p0 = self.idx_ori(v0);
+        let p1 = self.idx_ori(v1);
+        let p2 = self.idx_ori(v2);
+        let p3 = self.idx_ori(v3);
+        let p4 = self[v4].position().coords;
+        if v0 == Self::GHOST {
+            robust_geo::orient_3d(p3, p2, p1, p4)
+        } else if v1 == Self::GHOST {
+            robust_geo::orient_3d(p2, p3, p0, p4)
+        } else if v2 == Self::GHOST {
+            robust_geo::orient_3d(p1, p0, p3, p4)
+        } else if v3 == Self::GHOST {
+            robust_geo::orient_3d(p0, p1, p2, p4)
+        } else {
+            robust_geo::in_sphere(p0, p1, p2, p3, p4)
+        }
+    }
+
+    /// Gets whether the last point is in the circumsphere of the first 4 points.
+    /// Uses simulation of simplicity to avoid ties.
+    /// [v0, v1, v2, v3] must have positive orientation.
+    /// Assumes that none of the points equal and that the last point isn't the ghost vertex.
+    pub fn in_sphere_sim(
         &self,
         v0: VertexId,
         v1: VertexId,
@@ -2266,28 +2352,28 @@ impl<V, T> TetMesh<V, T> {
             }))
             .for_each(|_| {});
 
-        //// Set the first 4 points to not be coplanar.
-        //// Assume the first 2 points are not the same because of the distance tolerance.
-        //let p0 = vertices[0].1;
-        //let p1 = vertices[1].1;
-        //let v2i = vertices.iter().enumerate().skip(2).map(|(i, (_, p2, _))| {
-        //    let areax2 = (p1 - p0).cross(&(p2 - p0)).norm();
-        //    let max_len = (p1 - p0).norm().max((p2 - p1).norm()).max((p0 - p2).norm());
-        //    (i, areax2 / max_len)
-        //}).filter(|(_, r)| *r >= distance_tolerance).max_by_key(|(_, r)| FloatOrd(*r))
-        //    .expect("All points are collinear within the tolerance.").0;
-        //vertices.swap(2, v2i);
-        //let p2 = vertices[2].1;
+        // Set the first 4 points to not be coplanar.
+        // Assume the first 2 points are not the same because of the distance tolerance.
+        let p0 = vertices[0].1;
+        let p1 = vertices[1].1;
+        let v2i = vertices.iter().enumerate().skip(2).map(|(i, (_, p2, _))| {
+            let areax2 = (p1 - p0).cross(&(p2 - p0)).norm();
+            let max_len = (p1 - p0).norm().max((p2 - p1).norm()).max((p0 - p2).norm());
+            (i, areax2 / max_len)
+        }).filter(|(_, r)| *r >= distance_tolerance).max_by_key(|(_, r)| FloatOrd(*r))
+            .expect("All points are collinear within the tolerance.").0;
+        vertices.swap(2, v2i);
+        let p2 = vertices[2].1;
 
-        //let v3i = vertices.iter().skip(3).position(|(_, p3, _)| {
-        //    let volx6 = -(p1 - p0).cross(&(p2 - p0)).dot(&(p3 - p0));
-        //    let max_area = [[p0, p1, p0, p2], [*p3, p2, *p3, p1], [p2, *p3, p2, p0], [p1, p0, p1, *p3],
-        //        [p0, p1, p2, *p3], [p0, p2, p1, *p3], [p0, *p3, p1, p2]].iter().map(|[pa, pb, pc, pd]|
-        //            (pb - pa).cross(&(pd - pc)).norm())
-        //            .max_by_key(|area| FloatOrd(*area)).unwrap();
-        //    volx6.abs() / max_area >= distance_tolerance
-        //}).expect("All points are coplanar within the tolerance.");
-        //vertices.swap(3, v3i + 3);
+        let v3i = vertices.iter().skip(3).position(|(_, p3, _)| {
+            let volx6 = -(p1 - p0).cross(&(p2 - p0)).dot(&(p3 - p0));
+            let max_area = [[p0, p1, p0, p2], [*p3, p2, *p3, p1], [p2, *p3, p2, p0], [p1, p0, p1, *p3],
+                [p0, p1, p2, *p3], [p0, p2, p1, *p3], [p0, *p3, p1, p2]].iter().map(|[pa, pb, pc, pd]|
+                    (pb - pa).cross(&(pd - pc)).norm())
+                    .max_by_key(|area| FloatOrd(*area)).unwrap();
+            volx6.abs() / max_area >= distance_tolerance
+        }).expect("All points are coplanar within the tolerance.");
+        vertices.swap(3, v3i + 3);
 
         let mut drain = vertices.drain(0..4);
         let v0 = drain.next().unwrap();
@@ -2365,7 +2451,7 @@ impl<V, T> TetMesh<V, T> {
         let lucky_tet = self[closest].tet.id();
         let not_delaunay = if {
             let vs = self[lucky_tet].vertices;
-            self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
+            self.in_sphere_sim(vs[0], vs[1], vs[2], vs[3], id)
         } {
             lucky_tet
         } else {
@@ -2387,7 +2473,7 @@ impl<V, T> TetMesh<V, T> {
             unsafe {
                 self.vertex_tets_opt(closest).find(|tet| {
                     let vs = self[*tet].vertices();
-                    self.in_sphere(vs[0], vs[1], vs[2], vs[3], id)
+                    self.in_sphere_sim(vs[0], vs[1], vs[2], vs[3], id)
                 })
             }
             .unwrap_or_else(|| {
@@ -2405,7 +2491,7 @@ impl<V, T> TetMesh<V, T> {
                 while let Some(tet) = tets.pop_front() {
                     if checked.insert(tet) {
                         let vs = self[tet].vertices();
-                        if self.in_sphere(vs[0], vs[1], vs[2], vs[3], id) {
+                        if self.in_sphere_sim(vs[0], vs[1], vs[2], vs[3], id) {
                             return tet;
                         }
                     }
@@ -2421,7 +2507,7 @@ impl<V, T> TetMesh<V, T> {
 
         // Find all non-Delaunay tets
         let (mut boundary, enclosed) =
-            self.walker_from_tet(not_delaunay)
+            self.walker_from_tet_id(not_delaunay)
                 .point_cavity(self, true, id);
 
         // Add the new vertex
@@ -2499,6 +2585,56 @@ impl<V, T> TetMesh<V, T> {
         }
     }
 
+    /// Removes silver tets in the mesh.
+    pub fn remove_slivers(&mut self) where V: Clone, T: Clone {
+        let slivers = self.tets.iter().filter(|(id, tet)| {
+            let vs = tet.vertices;
+            !self.non_sliver(vs[0], vs[1], vs[2], vs[3])
+        }).map(|(_, tet)| tet.vertices).collect::<Vec<_>>();
+
+        println!("Sliver to tet ratio: {}/{}", slivers.len(), self.num_tets());
+
+        let mut num_slivers = slivers.len();
+        for sliver in slivers {
+            for depth in &[1, 2, 4, 8] {
+                if let Some(walker) = self.walker_from_tet(sliver) {
+                    match walker.sliver_kind(self) {
+                        SliverKind::EdgeEdge(walker) => {
+                            let other_tet = walker.to_opp_edge().tet(self);
+                            if walker.progress_by_removing_edge(
+                                self, |_, _| true, |_, _| true, *depth, false, &mut vec![], &mut vec![]
+                            ).is_some() {
+                                num_slivers -= 1;
+                                break;
+                            }
+
+                            // Walker got invalidated
+                            let walker = self.walker_from_tet(other_tet).unwrap();
+                            if walker.progress_by_removing_edge(
+                                self, |_, _| true, |_, _| true, *depth, false, &mut vec![], &mut vec![]
+                            ).is_some() {
+                                num_slivers -= 1;
+                                break;
+                            }
+                        }
+
+                        SliverKind::TriVertex(walker) => {
+                            if walker.progress_by_removing_tri(
+                                self, |_, _| true, |_, _| true, *depth, false, &mut vec![], &mut vec![]
+                            ).is_some() {
+                                num_slivers -= 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("New sliver to tet ratio: {}/{}", num_slivers, self.num_tets());
+        self.export_debug_obj("ignore/less_slivers.obj").unwrap();
+    }
+
     /// Attempts to recover an edge
     /// and locks it to prevent it from flipping outside of unchecked flip functions.
     /// Returns whether it succeeded.
@@ -2554,6 +2690,7 @@ impl<V, T> TetMesh<V, T> {
                             tri.contains(&edge[0]) || tri.contains(&edge[1]) ||
                             !mesh.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1]),
                         depth,
+                        true,
                         &mut vec![],
                         &mut vec![],
                     ) {
@@ -2568,27 +2705,13 @@ impl<V, T> TetMesh<V, T> {
         }
     }
 
-    /// Recovers edges in a PLC, adding Steiner points as necessary in both the tet mesh and the PLC,
+    /// Recovers specific edges in a PLC, adding Steiner points as necessary in both the tet mesh and the PLC,
     /// and locks them to prevent them from flipping outside of unchecked flip functions.
-    pub fn recover_and_lock_edges<E, F>(&mut self, plc: &mut Plc<V, E, F>) where V: Clone, T: Clone {
-        // Needed for the edge and tri removal functions.
-        self.set_track_tri_map(true);
-
-        let mut plc_edges = plc
-            .edges()
-            .map(|(_, edge)| sorted_2(edge.vertices()))
-            .collect::<FnvHashSet<_>>();
-
-        // Lock already recovered edges
-        for (_, edge) in self.edges.iter() {
-            if plc_edges.remove(&edge.vertices) {
-                // No need to remove the reverse because `edge.vertices` is sorted.
-                edge.set_flags(UndirEdgeFlags::LOCKED);
-            }
-        }
-
-        let mut to_recover = plc_edges.into_iter().collect::<Vec<_>>();
+    pub fn recover_and_lock_specific_edges<I: IntoIterator<Item = [VertexId; 2]>>(&mut self, edges: I) -> usize where V: Clone, T: Clone {
+        let mut to_recover = edges.into_iter().collect::<Vec<_>>();
+        let initial = to_recover.clone();
         let mut curr_to_recover = vec![];
+        let mut num_steiner = 0;
         while !to_recover.is_empty() {
             for depth in &[1, 2, 4, 8] {
                 curr_to_recover.append(&mut to_recover);
@@ -2599,10 +2722,6 @@ impl<V, T> TetMesh<V, T> {
                 }
             }
 
-            println!("Edges to recover: {}", to_recover.len());
-
-            let mut num_steiner = 0;
-            let mut num_intersect = 0;
             curr_to_recover.append(&mut to_recover);
             for edge in curr_to_recover.drain(..) {
                 if self.walker_from_edge(edge).is_none() {
@@ -2629,7 +2748,6 @@ impl<V, T> TetMesh<V, T> {
                             }).unwrap())
                         }
                     }).collect::<VecDeque<_>>();
-                    num_intersect += search.len() - 1;
 
                     // Add a Steiner point at the midpoint.
                     let mut search_iter = search.iter();
@@ -2646,6 +2764,11 @@ impl<V, T> TetMesh<V, T> {
                         let denom = robust_geo::orient_3d(ep[1] - ep[0] + tp[0].coords, tp[1].coords, tp[2].coords, tp[0].coords);
                         numer / denom
                     })
+                    //.inspect(|fac| {
+                    //    if initial[0][0].0 == 1871 && initial[0][1].0 == 2014 {
+                    //        println!("Len factor: {}", (ep[1] - ep[0]).norm() * fac);
+                    //    }
+                    //})
                     //.inspect(|(n, d)| {
                     //    println!("{}/{}", n, d);
                     //    let len = (ep[1] - ep[0]).norm();
@@ -2654,11 +2777,20 @@ impl<V, T> TetMesh<V, T> {
                     //        panic!("Factor too close to 0 or 1, inserting in edge {}-{}, position {:?} to {:?}", edge[0], edge[1], ep[0], ep[1]);
                     //    }
                     //})
-                    .filter(|fac| *fac >= 0.0 && *fac <= 1.0)
+                    .filter(|fac| {
+                        let len = (ep[1] - ep[0]).norm();
+                        len * *fac >= self.tolerance && len * *fac <= len - self.tolerance
+                        //*fac >= 0.0 && *fac <= 1.0
+                    })
                     .min_by_key(|fac| FloatOrd((fac - 0.5).abs()))
                     .map_or(((ep[0].coords + ep[1].coords) / 2.0).into(),
                         |fac| ep[0] + (ep[1] - ep[0]) * fac);
                     //let mid = Pt3::from((ep[0].coords + ep[1].coords) / 2.0);
+                    //if initial[0][0].0 == 1871 && initial[0][1].0 == 2014 {
+                    //    println!();
+                    //}
+                    assert!((mid - ep[0]).norm() >= self.tolerance && (mid - ep[1]).norm() >= self.tolerance,
+                        "Steiner point overload when trying to recover edge {}-{}", initial[0][0], initial[0][1]);
 
                     let steiner = self.vertices.insert(
                         Vertex::new(TetWalker::new(TetId::invalid(), 0), mid, self[edge[0]].value().clone()));
@@ -2669,7 +2801,7 @@ impl<V, T> TetMesh<V, T> {
                     while let Some(tet) = search.pop_front() {
                         if visited.insert(tet) {
                             let vs = self[tet].vertices();
-                            let walker = self.walker_from_tet(tet);
+                            let walker = self.walker_from_tet_id(tet);
                             if self.tet_intersects_vertex(vs[0], vs[1], vs[2], vs[3], steiner) {
                                 let (mut boundary, enclosure) = walker.point_cavity(self, false, steiner);
                                 self.flip_in_vertex_unchecked(steiner, &mut boundary, &enclosure);
@@ -2689,10 +2821,42 @@ impl<V, T> TetMesh<V, T> {
                     }
                 }
             }
-
-            println!("{} intersection points", num_intersect);
-            println!("Added {} Steiner vertices", num_steiner);
         }
+
+        num_steiner
+    }
+
+    /// Recovers edges in a PLC, adding Steiner points as necessary in both the tet mesh and the PLC,
+    /// and locks them to prevent them from flipping outside of unchecked flip functions.
+    pub fn recover_and_lock_edges<E, F>(&mut self, plc: &mut Plc<V, E, F>) where V: Clone, T: Clone {
+        // Needed for the edge and tri removal functions.
+        self.set_track_tri_map(true);
+
+        self.remove_slivers();
+
+        let mut plc_edges = plc
+            .edges()
+            .map(|(_, edge)| sorted_2(edge.vertices()))
+            .collect::<FnvHashSet<_>>();
+
+        // Lock already recovered edges
+        for (_, edge) in self.edges.iter() {
+            if plc_edges.remove(&edge.vertices) {
+                // No need to remove the reverse because `edge.vertices` is sorted.
+                edge.set_flags(UndirEdgeFlags::LOCKED);
+            }
+        }
+
+        let to_recover = plc_edges.into_iter().collect::<Vec<_>>();
+        let mut total_steiner = 0;
+        for edge in to_recover {
+            let num_steiner = self.recover_and_lock_specific_edges(iter::once(edge));
+            if num_steiner > 0 {
+                println!("Added {} Steiner points to recover {}-{}", num_steiner, edge[0], edge[1]);
+            }
+            total_steiner += num_steiner;
+        }
+        println!("Added {} Steiner points total.", total_steiner);
     }
 
     #[cfg(feature = "obj")]
@@ -2744,6 +2908,142 @@ impl<V, T> TetMesh<V, T> {
             material_libs: vec![],
         };
         obj.save(path)
+    }
+
+    /// Assert all the invariants of this tet mesh.
+    #[track_caller]
+    fn assert_integrity(self: &TetMesh<V, T>, orient_test: bool) {
+        // Vertex invariants
+        for (id, vertex) in self.vertices.iter() {
+            assert!(
+                vertex.tet.id().is_valid(),
+                "Vertex {} has an invalid tet walker",
+                id
+            );
+            assert_eq!(
+                vertex.tet.first(self),
+                id,
+                "Tet walker ({}, {}) of vertex {} does not start with the vertex.",
+                vertex.tet.id(),
+                vertex.tet.edge,
+                id
+            );
+        }
+
+        // Edge invariants
+        for (id, edge) in self.edges.iter() {
+            assert_ne!(
+                edge.vertices[0], edge.vertices[1],
+                "Edge {} has equal vertices.",
+                id
+            );
+            assert!(
+                edge.vertices[0] < edge.vertices[1],
+                "Edge {} has unsorted vertices.",
+                id
+            );
+        }
+        let edge_set = self
+            .edges
+            .values()
+            .map(|edge| {
+                let mut vs = edge.vertices;
+                vs.sort();
+                vs
+            })
+            .collect::<FnvHashSet<_>>();
+        assert_eq!(
+            self.edges.len(),
+            edge_set.len(),
+            "There are duplicate edges."
+        );
+
+        let mut edge_ids = self.edges.keys().collect::<FnvHashSet<_>>();
+        for tet in self.tets.values() {
+            for id in &tet.edges {
+                edge_ids.remove(id);
+            }
+        }
+        if !edge_ids.is_empty() {
+            panic!(
+                "Edge {} does not belong to a tet.",
+                edge_ids.iter().next().unwrap()
+            );
+        }
+
+        if self.track_tri_map {
+            for (tri, walker) in &self.tri_map {
+                assert_eq!(
+                    TriVertices::new(walker.tri(self)),
+                    *tri,
+                    "Triangle {}-{}-{} points to the wrong tet walker: ({}, {})",
+                    tri.0[0],
+                    tri.0[1],
+                    tri.0[2],
+                    walker.id(),
+                    walker.edge
+                );
+            }
+        }
+
+        // Tet invariants
+        for (id, tet) in self.tets.iter() {
+            assert_eq!(
+                tet.vertices().len(),
+                tet.vertices().iter().collect::<FnvHashSet<_>>().len(),
+                "Tet {} does not have unique vertices.",
+                id
+            );
+
+            if orient_test {
+                let vs = tet.vertices();
+                assert!(
+                    self.orient_3d(vs[0], vs[1], vs[2], vs[3]),
+                    "Tet {} (vertices {} {} {} {}) is oriented negative.",
+                    id,
+                    vs[0],
+                    vs[1],
+                    vs[2],
+                    vs[3]
+                );
+            }
+
+            for i in 0..12 {
+                let walker = TetWalker::new(id, i);
+                let vi = walker.tet(self);
+                let mut vs = vi;
+                vs.swap(0, 1);
+                vs[3] = tet.opp_tets[i as usize % 4].fourth(self);
+                assert_eq!(walker.to_adj(self).tet(self), vs, 
+                    "Tet walker ({}, {}) (vertices {} {} {} {}) does not point to the adjacent tet the right way",
+                    walker.id(), walker.edge, vi[0], vi[1], vi[2], vi[3]);
+
+                assert_eq!(walker.to_adj(self).to_adj(self).tet(self), vi,
+                    "Adjacent tet walker ({}, {}) of tet walker ({}, {}) (vertices {} {} {} {}) does not point back to the tet walker.",
+                    walker.to_adj(self).id(), walker.to_adj(self).edge, walker.id(), walker.edge, vi[0], vi[1], vi[2], vi[3]);
+
+                let mut edge_vs = self.edges[walker.undir_edge(self)].vertices;
+                vs[..2].sort();
+                edge_vs.sort();
+                assert_eq!(
+                    vs[..2],
+                    edge_vs,
+                    "Tet walker ({}, {}) does not point to the right edge.",
+                    walker.id(),
+                    walker.edge
+                );
+
+                if i < 4 && self.track_tri_map {
+                    assert!(
+                        self.tri_map
+                            .contains_key(&TriVertices::new(walker.tri(self))),
+                        "Tet walker ({}, {}) has triangle missing from map",
+                        walker.id(),
+                        walker.edge
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -2990,143 +3290,6 @@ mod tests {
     even_sort_fn!(even_sort_3, 3);
     even_sort_fn!(even_sort_4, 4);
 
-    /// Assert all the invariants of this tet mesh.
-    #[cfg(test)]
-    #[track_caller]
-    fn assert_integrity<V, T>(mesh: &TetMesh<V, T>, orient_test: bool) {
-        // Vertex invariants
-        for (id, vertex) in mesh.vertices.iter() {
-            assert!(
-                vertex.tet.id().is_valid(),
-                "Vertex {} has an invalid tet walker",
-                id
-            );
-            assert_eq!(
-                vertex.tet.first(mesh),
-                id,
-                "Tet walker ({}, {}) of vertex {} does not start with the vertex.",
-                vertex.tet.id(),
-                vertex.tet.edge,
-                id
-            );
-        }
-
-        // Edge invariants
-        for (id, edge) in mesh.edges.iter() {
-            assert_ne!(
-                edge.vertices[0], edge.vertices[1],
-                "Edge {} has equal vertices.",
-                id
-            );
-            assert!(
-                edge.vertices[0] < edge.vertices[1],
-                "Edge {} has unsorted vertices.",
-                id
-            );
-        }
-        let edge_set = mesh
-            .edges
-            .values()
-            .map(|edge| {
-                let mut vs = edge.vertices;
-                vs.sort();
-                vs
-            })
-            .collect::<FnvHashSet<_>>();
-        assert_eq!(
-            mesh.edges.len(),
-            edge_set.len(),
-            "There are duplicate edges."
-        );
-
-        let mut edge_ids = mesh.edges.keys().collect::<FnvHashSet<_>>();
-        for tet in mesh.tets.values() {
-            for id in &tet.edges {
-                edge_ids.remove(id);
-            }
-        }
-        if !edge_ids.is_empty() {
-            panic!(
-                "Edge {} does not belong to a tet.",
-                edge_ids.iter().next().unwrap()
-            );
-        }
-
-        if mesh.track_tri_map {
-            for (tri, walker) in &mesh.tri_map {
-                assert_eq!(
-                    TriVertices::new(walker.tri(mesh)),
-                    *tri,
-                    "Triangle {}-{}-{} points to the wrong tet walker: ({}, {})",
-                    tri.0[0],
-                    tri.0[1],
-                    tri.0[2],
-                    walker.id(),
-                    walker.edge
-                );
-            }
-        }
-
-        // Tet invariants
-        for (id, tet) in mesh.tets.iter() {
-            assert_eq!(
-                tet.vertices().len(),
-                tet.vertices().iter().collect::<FnvHashSet<_>>().len(),
-                "Tet {} does not have unique vertices.",
-                id
-            );
-
-            if orient_test {
-                let vs = tet.vertices();
-                assert!(
-                    mesh.orient_3d(vs[0], vs[1], vs[2], vs[3]),
-                    "Tet {} (vertices {} {} {} {}) is oriented negative.",
-                    id,
-                    vs[0],
-                    vs[1],
-                    vs[2],
-                    vs[3]
-                );
-            }
-
-            for i in 0..12 {
-                let walker = TetWalker::new(id, i);
-                let vi = walker.tet(mesh);
-                let mut vs = vi;
-                vs.swap(0, 1);
-                vs[3] = tet.opp_tets[i as usize % 4].fourth(mesh);
-                assert_eq!(walker.to_adj(mesh).tet(mesh), vs, 
-                    "Tet walker ({}, {}) (vertices {} {} {} {}) does not point to the adjacent tet the right way",
-                    walker.id(), walker.edge, vi[0], vi[1], vi[2], vi[3]);
-
-                assert_eq!(walker.to_adj(mesh).to_adj(mesh).tet(mesh), vi,
-                    "Adjacent tet walker ({}, {}) of tet walker ({}, {}) (vertices {} {} {} {}) does not point back to the tet walker.",
-                    walker.to_adj(mesh).id(), walker.to_adj(mesh).edge, walker.id(), walker.edge, vi[0], vi[1], vi[2], vi[3]);
-
-                let mut edge_vs = mesh.edges[walker.undir_edge(mesh)].vertices;
-                vs[..2].sort();
-                edge_vs.sort();
-                assert_eq!(
-                    vs[..2],
-                    edge_vs,
-                    "Tet walker ({}, {}) does not point to the right edge.",
-                    walker.id(),
-                    walker.edge
-                );
-
-                if i < 4 && mesh.track_tri_map {
-                    assert!(
-                        mesh.tri_map
-                            .contains_key(&TriVertices::new(walker.tri(mesh))),
-                        "Tet walker ({}, {}) has triangle missing from map",
-                        walker.id(),
-                        walker.edge
-                    );
-                }
-            }
-        }
-    }
-
     fn v(n: IdType) -> VertexId {
         VertexId(n)
     }
@@ -3270,7 +3433,7 @@ mod tests {
     fn test_walker() {
         let mesh = default_tets();
         let vs = mesh[t(0)].vertices();
-        let walker = mesh.walker_from_tet(t(0));
+        let walker = mesh.walker_from_tet_id(t(0));
 
         assert_eq!(walker.first(&mesh), vs[0]);
         assert_eq!(walker.second(&mesh), vs[1]);
@@ -3364,12 +3527,12 @@ mod tests {
             Pt3::origin(),
             (),
         ));
-        let walkers = mesh.walker_from_tet(t(1)).flip14_unchecked(&mut mesh, v(4));
+        let walkers = mesh.walker_from_tet_id(t(1)).flip14_unchecked(&mut mesh, v(4));
         for (_, walker) in walkers.iter().enumerate() {
             assert_eq!(walker.fourth(&mesh), v(4));
         }
 
-        assert_integrity(&mesh, false);
+        mesh.assert_integrity(false);
     }
 
     #[test]
@@ -3380,7 +3543,7 @@ mod tests {
             Pt3::origin(),
             (),
         ));
-        let walkers = mesh.walker_from_tet(t(0)).flip14_unchecked(&mut mesh, v(4)); // ids 0, 5, 6, 7
+        let walkers = mesh.walker_from_tet_id(t(0)).flip14_unchecked(&mut mesh, v(4)); // ids 0, 5, 6, 7
         let walkers = walkers[0].flip23_unchecked(&mut mesh); // flips tri [2, 1, 3] away, opp verts 4 and GHOST
         assert_eq!(walkers[0].opp_edge(&mesh), walkers[1].opp_edge(&mesh));
         assert_eq!(walkers[1].opp_edge(&mesh), walkers[2].opp_edge(&mesh));
@@ -3389,7 +3552,7 @@ mod tests {
             .opp_edge(&mesh)
             .contains(&TetMesh::<(), ()>::GHOST));
 
-        assert_integrity(&mesh, false);
+        mesh.assert_integrity(false);
     }
 
     #[test]
@@ -3400,7 +3563,7 @@ mod tests {
             Pt3::origin(),
             (),
         ));
-        let walkers = mesh.walker_from_tet(t(0)).flip14_unchecked(&mut mesh, v(4)); // ids 0, 5, 6, 7
+        let walkers = mesh.walker_from_tet_id(t(0)).flip14_unchecked(&mut mesh, v(4)); // ids 0, 5, 6, 7
         let walkers = walkers[0].flip23_unchecked(&mut mesh); // flips tri [2, 1, 3] away, opp verts 4 and GHOST
         let walkers = walkers[0]
             .to_perm(Permutation::_3210)
@@ -3413,7 +3576,7 @@ mod tests {
         );
         assert_eq!(walkers[0].fourth(&mesh), walkers[1].fourth(&mesh));
 
-        assert_integrity(&mesh, false);
+        mesh.assert_integrity(false);
     }
 
     //#[test]
@@ -3553,7 +3716,7 @@ mod tests {
     //        }
     //    }
 
-    //    assert_integrity(&mesh, false);
+    //    mesh.assert_integrity(false);
     //}
 
     //#[test]
@@ -3619,7 +3782,7 @@ mod tests {
     //        }
     //    }
 
-    //    assert_integrity(&mesh, false);
+    //    mesh.assert_integrity(false);
     //}
 
     #[test]
@@ -3630,7 +3793,7 @@ mod tests {
             Pt3::origin(),
             (),
         ));
-        mesh.walker_from_tet(t(0)).flip14_unchecked(&mut mesh, v(4));
+        mesh.walker_from_tet_id(t(0)).flip14_unchecked(&mut mesh, v(4));
 
         let walkers = mesh.walkers_from_vertex(v(4)).collect::<Vec<_>>();
         assert_eq!(walkers.len(), 4);
@@ -3647,7 +3810,7 @@ mod tests {
             Pt3::origin(),
             (),
         ));
-        mesh.walker_from_tet(t(0)).flip14_unchecked(&mut mesh, v(4));
+        mesh.walker_from_tet_id(t(0)).flip14_unchecked(&mut mesh, v(4));
 
         let tets = mesh.vertex_tets(v(4)).collect::<Vec<_>>();
         assert_eq!(tets.len(), 4);
@@ -3674,7 +3837,7 @@ mod tests {
             Pt3::origin(),
             (),
         ));
-        mesh.walker_from_tet(t(0)).flip14_unchecked(&mut mesh, v(4));
+        mesh.walker_from_tet_id(t(0)).flip14_unchecked(&mut mesh, v(4));
 
         let targets = mesh.vertex_targets(v(4)).collect::<Vec<_>>();
         assert_eq!(targets.len(), 4);
@@ -3695,10 +3858,10 @@ mod tests {
             (),
         ));
 
-        assert!(mesh.in_sphere(TetMesh::<(), ()>::GHOST, v(1), v(2), v(3), v(4)));
-        assert!(!mesh.in_sphere(v(0), TetMesh::<(), ()>::GHOST, v(2), v(3), v(4)));
-        assert!(!mesh.in_sphere(v(0), v(1), TetMesh::<(), ()>::GHOST, v(3), v(4)));
-        assert!(!mesh.in_sphere(v(0), v(1), v(2), TetMesh::<(), ()>::GHOST, v(4)));
+        assert!(mesh.in_sphere_sim(TetMesh::<(), ()>::GHOST, v(1), v(2), v(3), v(4)));
+        assert!(!mesh.in_sphere_sim(v(0), TetMesh::<(), ()>::GHOST, v(2), v(3), v(4)));
+        assert!(!mesh.in_sphere_sim(v(0), v(1), TetMesh::<(), ()>::GHOST, v(3), v(4)));
+        assert!(!mesh.in_sphere_sim(v(0), v(1), v(2), TetMesh::<(), ()>::GHOST, v(4)));
     }
 
     #[test]
@@ -3710,7 +3873,7 @@ mod tests {
             (),
         ));
 
-        assert!(mesh.in_sphere(v(0), v(1), v(3), v(2), v(4)));
+        assert!(mesh.in_sphere_sim(v(0), v(1), v(3), v(2), v(4)));
     }
 
     #[test]
@@ -3797,6 +3960,7 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 1,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
@@ -3815,7 +3979,7 @@ mod tests {
                 [1, 4, 0, u32::MAX],
             ],
         );
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -3843,6 +4007,7 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 1,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
@@ -3865,7 +4030,7 @@ mod tests {
                 [3, 0, 5, u32::MAX],
             ],
         );
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -3893,13 +4058,14 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 2,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
             Some(0)
         );
         assert_eq!(mesh.num_tets(), 12);
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -3929,13 +4095,14 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 5,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
             None
         );
         assert_tets_ids(&mesh, tets);
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -3961,6 +4128,7 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 1,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
@@ -3979,7 +4147,7 @@ mod tests {
                 [4, 2, 0, u32::MAX],
             ],
         );
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -4016,6 +4184,7 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 1,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
@@ -4023,7 +4192,7 @@ mod tests {
         );
         // Expect the Delaunay tetrahedralization
         assert_tets_ids(&mesh, tets);
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -4043,13 +4212,14 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 5,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
             None
         );
         assert_tets_ids(&mesh, tets);
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -4074,6 +4244,7 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 1,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
@@ -4093,7 +4264,7 @@ mod tests {
                 [0, 4, 2, u32::MAX],
             ],
         );
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -4124,13 +4295,14 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 1,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
             None
         );
         assert_tets_ids(&mesh, tets);
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -4157,6 +4329,7 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 2,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
@@ -4172,7 +4345,7 @@ mod tests {
             [2, 4, 1, u32::MAX],
             [1, 4, 0, u32::MAX],
         ]);
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -4201,13 +4374,14 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 5,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
             None
         );
         assert_tets_ids(&mesh, tets);
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -4226,13 +4400,14 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 5,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
             None
         );
         assert_tets_ids(&mesh, tets);
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 
     #[test]
@@ -4267,6 +4442,7 @@ mod tests {
                 |_, _| true,
                 |_, _| true,
                 1,
+                true,
                 &mut vec![],
                 &mut vec![]
             ),
@@ -4274,6 +4450,6 @@ mod tests {
         );
         // Expect the Delaunay tetrahedralization
         assert_tets_ids(&mesh, tets);
-        assert_integrity(&mesh, true);
+        mesh.assert_integrity(true);
     }
 }

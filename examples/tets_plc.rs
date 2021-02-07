@@ -30,13 +30,13 @@ fn main() {
 
         let mut tets = TetMesh::delaunay_from_vertices(
             plc.vertices().map(|(_, v)| (v.position(), *v.value())),
-            0.0015,
+            1e-6,
             || (),
         );
         tets.recover_and_lock_edges(&mut plc);
 
         tets.export_debug_obj(output)
-            .expect("Coult not save output");
+            .expect("Could not save output");
     }
     #[cfg(not(feature = "obj"))]
     panic!("This example requires the \"obj\" feature.");
