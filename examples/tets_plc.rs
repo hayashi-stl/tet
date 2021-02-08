@@ -23,7 +23,7 @@ fn main() {
             panic!("Missing output obj")
         });
 
-        let mut plc = Plc::load_obj(input, || (), || (), || ()).expect("Could not load input");
+        let plc = Plc::load_obj(input, || (), || (), || ()).expect("Could not load input");
         if let Err(err) = plc.validate(0.0015) {
             panic!("{}", err)
         }
@@ -33,7 +33,7 @@ fn main() {
             1e-6,
             || (),
         );
-        tets.recover_and_lock_edges(&mut plc);
+        tets.recover_and_lock_boundary(&plc);
 
         tets.export_debug_obj(output)
             .expect("Could not save output");

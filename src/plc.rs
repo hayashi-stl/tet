@@ -238,9 +238,21 @@ impl<F> Face<F> {
 
 /// A triangle resulting from triangulating the PLC.
 #[derive(Clone, Debug)]
-pub struct Triangle {
+pub struct Tri {
     vertices: [VertexId; 3],
     face: FaceId,
+}
+
+impl Tri {
+    /// Gets the vertices of this triangle
+    pub fn vertices(&self) -> [VertexId; 3] {
+        self.vertices
+    }
+
+    /// Gets the face that this triangle is on
+    pub fn face(&self) -> FaceId {
+        self.face
+    }
 }
 
 /// A piecewise linear complex. Contains vertices, edges and faces.
@@ -535,7 +547,7 @@ impl<V, E, F> Plc<V, E, F> {
     }
 
     /// Triangulates all the faces and returns the triangles in one big `Vec`.
-    pub fn tris(&self) -> Vec<Triangle> {
+    pub fn tris(&self) -> Vec<Tri> {
         let mut tris = vec![];
 
         for (id, face) in self.faces.iter() {
@@ -590,7 +602,7 @@ impl<V, E, F> Plc<V, E, F> {
             let inv_map = vertex_map.into_iter().map(|(k, v)| (v, k)).collect::<FnvHashMap<_, _>>();
             for tri in visited {
                 let [v0, v1, v2] = cdt.face(tri).as_triangle();
-                tris.push(Triangle {
+                tris.push(Tri {
                     vertices: [inv_map[&v0.fix()], inv_map[&v1.fix()], inv_map[&v2.fix()]],
                     face: id,
                 })
