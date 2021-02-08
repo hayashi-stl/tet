@@ -6,13 +6,15 @@ use crate::{
     Pt1, Pt3, Vec3, VertexId,
 };
 
-use fnv::FnvHashMap;
-use nalgebra::Unit;
+use fnv::{FnvHashMap, FnvHashSet};
+use nalgebra::{Isometry3, Unit};
 use ncollide3d::partitioning::{BVH, BVT};
+use spade::delaunay::FloatCDT;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::hash::Hash;
 use std::{collections::hash_map::Entry, fmt::Debug, iter, ops::Index};
+use std::iter::FromIterator;
 
 crate::id! {
     /// A PLC edge id
@@ -232,6 +234,13 @@ impl<F> Face<F> {
     pub fn vertices<'a, V, E>(&self, plc: &'a Plc<V, E, F>) -> FaceVerticesByRing<'a, V, E, F> {
         FaceVerticesByRing(self.rings(plc))
     }
+}
+
+/// A triangle resulting from triangulating the PLC.
+#[derive(Clone, Debug)]
+pub struct Triangle {
+    vertices: [VertexId; 3],
+    face: FaceId,
 }
 
 /// A piecewise linear complex. Contains vertices, edges and faces.
@@ -523,6 +532,72 @@ impl<V, E, F> Plc<V, E, F> {
             .sum::<Vec3>();
 
         self.faces[face].plane = (center, Unit::new_normalize(normal))
+    }
+
+    /// Triangulates all the faces and returns the triangles in one big `Vec`.
+    pub fn tris(&self) -> Vec<Triangle> {
+        let mut tris = vec![];
+
+        for (id, face) in self.faces.iter() {
+            let (center, normal) = face.plane;
+            let mut tangent = normal.cross(&Vec3::new(1.0, 0.0, 0.0));
+            if normal.x.abs() > 0.9 {
+                tangent = normal.cross(&Vec3::new(0.0, 1.0, 0.0));
+            }
+            let tangent = Unit::new_normalize(tangent);
+            let transform = Isometry3::look_at_lh(&center, &(center + normal.xyz()), &tangent);
+
+            let vertices = face.vertices(self)
+                .map(Vec::from_iter).collect::<Vec<_>>();
+
+            let mut cdt = FloatCDT::with_walk_locate();
+            let vertex_map = vertices.iter().flatten().map(|vertex| {
+                let pos = transform * vertex.1.position();
+                let handle = cdt.insert([pos.x, pos.y]);
+                (vertex.0, handle)
+            }).collect::<FnvHashMap<_, _>>();
+
+            // Add the constraints
+            for ring in &vertices {
+                if ring.len() > 1 {
+                    for (v0, v1) in ring.iter().zip(ring.iter().cycle().skip(1)) {
+                        let h0 = vertex_map[&v0.0];
+                        let h1 = vertex_map[&v1.0];
+                        cdt.add_constraint(h0, h1);
+                        assert!(cdt.exists_constraint(h0, h1)); // The constraint edge must be added and must not be split.
+                    }
+                }
+            }
+
+            // Get the triangles
+            let mut visited = FnvHashSet::default();
+            let mut to_search = vertices.into_iter().filter(|ring| ring.len() > 1).flat_map(|ring| {
+                ring.iter().zip(ring.iter().cycle().skip(1))
+                    .map(|(v0, v1)| cdt.get_edge_from_neighbors(vertex_map[&v0.0], vertex_map[&v1.0]).unwrap().fix())
+                    .collect::<Vec<_>>()
+            }).collect::<Vec<_>>();
+            while let Some(edge) = to_search.pop() {
+                let edge = cdt.edge(edge);
+                if visited.insert(edge.face().fix()) {
+                    for edge in edge.face().adjacent_edges() {
+                        if !cdt.is_constraint_edge(edge.fix()) {
+                            to_search.push(edge.fix());
+                        }
+                    }
+                }
+            }
+
+            let inv_map = vertex_map.into_iter().map(|(k, v)| (v, k)).collect::<FnvHashMap<_, _>>();
+            for tri in visited {
+                let [v0, v1, v2] = cdt.face(tri).as_triangle();
+                tris.push(Triangle {
+                    vertices: [inv_map[&v0.fix()], inv_map[&v1.fix()], inv_map[&v2.fix()]],
+                    face: id,
+                })
+            }
+        }
+
+        tris
     }
 
     /// Check that this is a valid PLC.
@@ -1331,6 +1406,37 @@ mod tests {
         assert_eq!(result, expect, "Assert faces failed");
     }
 
+    #[track_caller]
+    fn assert_tris<
+        V,
+        E,
+        F,
+        I: IntoIterator<Item = ([VertexId; 3], FaceId)>,
+    >(
+        plc: &Plc<V, E, F>,
+        tris: I,
+    ) {
+        let mut result = plc.tris().into_iter().map(|tri| (tri.vertices, tri.face)).collect::<Vec<_>>();
+        canonicalize_tris(&mut result);
+        let mut expect = tris.into_iter().collect::<Vec<_>>();
+        canonicalize_tris(&mut expect);
+
+        assert_eq!(result, expect, "Assert tris failed");
+    }
+
+    fn canonicalize_tris(tris: &mut [([VertexId; 3], FaceId)]) {
+        for tri in &mut *tris {
+            let min = *tri.0.iter().min().unwrap();
+            let min_pos = tri.0.iter().position(|v| *v == min).unwrap();
+            tri.0.rotate_left(min_pos);
+        }
+        tris.sort_by_key(|(vs, f)| (*f, *vs));
+    }
+
+    fn v_id(id: u32) -> VertexId {
+        VertexId(id)
+    }
+
     fn v_ids(ids: Vec<u32>) -> Vec<VertexId> {
         ids.into_iter().map(|id| VertexId(id)).collect()
     }
@@ -1348,6 +1454,12 @@ mod tests {
     fn f_ids(ids: Vec<Vec<Vec<u32>>>) -> Vec<Vec<Vec<VertexId>>> {
         ids.into_iter()
             .map(|ids| ids.into_iter().map(|ids| v_ids(ids)).collect())
+            .collect()
+    }
+
+    fn tri_ids(ids: Vec<([u32; 3], u32)>) -> Vec<([VertexId; 3], FaceId)> {
+        ids.into_iter()
+            .map(|([a, b, c], f)| ([VertexId(a), VertexId(b), VertexId(c)], FaceId(f)))
             .collect()
     }
 
@@ -1660,5 +1772,143 @@ mod tests {
         );
 
         assert!(plc.validate(0.1).is_ok());
+    }
+
+    #[test]
+    fn test_tris_one() {
+        let plc = plc_from_pos_vef(
+            vec![
+                Pt3::new(1.0, 0.0, 0.0),
+                Pt3::new(0.0, 1.0, 0.0),
+                Pt3::new(0.0, 0.0, 1.0),
+            ],
+            vec![],
+            vec![
+                vec![vec![0, 1, 2]],
+            ],
+        );
+
+        assert_tris(&plc, tri_ids(vec![
+            ([2, 0, 1], 0),
+        ]))
+    }
+
+    #[test]
+    fn test_tris_concave_quad() {
+        let plc = plc_from_pos_vef(
+            vec![
+                Pt3::new(1.0, 0.0, 0.0),
+                Pt3::new(0.0, 1.0, 0.0),
+                Pt3::new(0.0, 0.0, 1.0),
+                Pt3::new(0.3, 0.4, 0.3),
+            ],
+            vec![],
+            vec![
+                vec![vec![0, 1, 2, 3]],
+            ],
+        );
+
+        assert_tris(&plc, tri_ids(vec![
+            ([3, 0, 1], 0),
+            ([1, 2, 3], 0),
+        ]))
+    }
+
+    #[test]
+    fn test_tris_isolated_vertex() {
+        let plc = plc_from_pos_vef(
+            vec![
+                Pt3::new(0.0, 0.0, 0.0),
+                Pt3::new(0.0, 2.0, 0.0),
+                Pt3::new(0.0, 2.0, 2.0),
+                Pt3::new(0.0, 0.0, 2.0),
+                Pt3::new(0.0, 1.0, 1.0),
+            ],
+            vec![],
+            vec![
+                vec![vec![0, 1, 2, 3], vec![4]],
+            ],
+        );
+
+        assert_tris(&plc, tri_ids(vec![
+            ([0, 4, 3], 0),
+            ([3, 4, 2], 0),
+            ([2, 4, 1], 0),
+            ([1, 4, 0], 0),
+        ]))
+    }
+
+    #[test]
+    fn test_tris_hole() {
+        let plc = plc_from_pos_vef(
+            vec![
+                Pt3::new(0.0, 0.0, 0.0),
+                Pt3::new(0.0, 6.0, 0.0),
+                Pt3::new(0.0, 0.0, 6.0),
+                Pt3::new(0.0, 2.0, 2.0),
+                Pt3::new(0.0, 1.0, 2.0),
+                Pt3::new(0.0, 2.0, 1.0),
+            ],
+            vec![],
+            vec![
+                vec![vec![0, 1, 2], vec![5, 4, 3]],
+            ],
+        );
+
+        assert_tris(&plc, tri_ids(vec![
+            ([1, 5, 0], 0),
+            ([5, 1, 3], 0),
+            ([2, 3, 1], 0),
+            ([3, 2, 4], 0),
+            ([0, 4, 2], 0),
+            ([4, 0, 5], 0),
+        ]))
+    }
+
+    #[test]
+    fn test_tris_slit() {
+        let plc = plc_from_pos_vef(
+            vec![
+                Pt3::new(0.0, 0.0, 0.0),
+                Pt3::new(0.0, 6.0, 0.0),
+                Pt3::new(0.0, 0.0, 6.0),
+                Pt3::new(0.0, 1.0, 1.0),
+                Pt3::new(0.0, 2.0, 1.0),
+            ],
+            vec![],
+            vec![
+                vec![vec![0, 1, 2], vec![3, 4]],
+            ],
+        );
+
+        assert_tris(&plc, tri_ids(vec![
+            ([4, 3, 0], 0),
+            ([1, 4, 0], 0),
+            ([2, 4, 1], 0),
+            ([2, 3, 4], 0),
+            ([0, 3, 2], 0),
+        ]))
+    }
+
+    #[test]
+    fn test_tris_multiple_faces() {
+        let plc = plc_from_pos_vef(
+            vec![
+                Pt3::new(0.0, 0.0, 0.0),
+                Pt3::new(1.0, 0.0, 0.0),
+                Pt3::new(1.0, 1.0, 0.0),
+                Pt3::new(1.0, 1.0, 1.0),
+            ],
+            vec![],
+            vec![
+                vec![vec![0, 1, 2]],
+                vec![vec![3, 2, 1]],
+            ],
+        );
+
+        assert_tris(&plc, tri_ids(vec![
+            ([0, 1, 2], 0),
+            ([3, 2, 1], 1),
+        ]))
     }
 }

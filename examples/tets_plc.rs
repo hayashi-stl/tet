@@ -33,7 +33,7 @@ fn main() {
             1e-6,
             || (),
         );
-        //tets.recover_and_lock_edges(&mut plc);
+        tets.recover_and_lock_edges(&mut plc);
 
         tets.export_debug_obj(output)
             .expect("Could not save output");
