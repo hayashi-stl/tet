@@ -1,5 +1,9 @@
+pub mod geo;
+
 use bitflags::bitflags;
 use float_ord::FloatOrd;
+use nalgebra::Vector2;
+use spade::delaunay::FloatCDT;
 use std::ops::Index;
 use std::{
     cell::Cell,
@@ -271,9 +275,32 @@ impl Hash for BoundaryTri {
 
 /// An edge or triangle
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum EdgeOrTri {
+pub enum EdgeOrTri {
     Edge([VertexId; 2]),
     Tri([VertexId; 3]),
+}
+
+impl EdgeOrTri {
+    fn as_edge(self) -> Option<[VertexId; 2]> {
+        match self {
+            Self::Edge(edge) => Some(edge),
+            Self::Tri(_) => None,
+        }
+    }
+
+    fn as_tri(self) -> Option<[VertexId; 3]> {
+        match self {
+            Self::Edge(_) => None,
+            Self::Tri(tri) => Some(tri),
+        }
+    }
+
+    fn sorted(self) -> Self {
+        match self {
+            Self::Edge(edge) => EdgeOrTri::Edge(sorted_2(edge)),
+            Self::Tri(tri) => EdgeOrTri::Tri(sorted_3(tri)),
+        }
+    }
 }
 
 /// The type of sliver, either a triangle and a vertex or 2 edges are too close to each other.
@@ -1464,29 +1491,14 @@ impl TetWalker {
     /// Returns the boundary of the region of tets that will be deleted by removing some vertex, starting at the current tet.
     /// Also returns all tets in the region.
     /// Each item in the boundary is a tet walker whose current triangle is a triangle of the boundary.
-    pub fn point_cavity<V, T>(
-        self,
+    pub fn point_cavity<V, T, BI: IntoIterator<Item = TetWalker>, EI: IntoIterator<Item = TetId>>(
+        initial_boundary: BI,
+        initial_enclosed: EI,
         mesh: &TetMesh<V, T>,
         convex: bool,
+        assert_star_shaped_boundary: bool,
         vertex: VertexId,
     ) -> (Vec<TetWalker>, Vec<TetId>) {
-        // Initialize intermediate boundary
-        let mut bound_imm = vec![
-            TetWalker::new(self.id(), 0),
-            TetWalker::new(self.id(), 1),
-            TetWalker::new(self.id(), 2),
-            TetWalker::new(self.id(), 3),
-        ].into_iter().collect::<VecDeque<_>>();
-        mesh.tets[self.id()].set_flags(
-            TetFlags::BOUND_IMM_0
-                | TetFlags::BOUND_IMM_1
-                | TetFlags::BOUND_IMM_2
-                | TetFlags::BOUND_IMM_3,
-        );
-
-        let mut boundary = vec![];
-        let mut enclosed = vec![self.id()];
-
         let imm_edge_flag = |edge| unsafe {
             // Safety: tri.edge % 4 is in 0..4, and TetFlags::BOUND_IMM_0.bits << i for i in 0..4 is a valid flag.
             TetFlags::from_bits_unchecked(TetFlags::BOUND_IMM_0.bits << edge % 4)
@@ -1499,6 +1511,21 @@ impl TetWalker {
             // Safety: tri.edge % 4 is in 0..4, and TetFlags::LOCKED_0.bits << i for i in 0..4 is a valid flag.
             TetFlags::from_bits_unchecked(TetFlags::LOCKED_0.bits << edge % 4)
         };
+
+        // Initialize intermediate boundary
+        let mut bound_imm = initial_boundary.into_iter().inspect(|walker| {
+            if assert_star_shaped_boundary {
+                // Make sure it's a star-shaped region
+                let vs = walker.tet(mesh);
+                assert!(mesh.orient_3d(vs[0], vs[1], vs[2], vertex) > 0.0,
+                    "Boundary triangle {}-{}-{} is not star shaped to vertex {}", vs[0], vs[1], vs[2], vertex);
+            }
+            
+            mesh.tets[walker.id()].set_flags(imm_edge_flag(walker.edge));
+        }).collect::<VecDeque<_>>();
+
+        let mut boundary = vec![];
+        let mut enclosed = initial_enclosed.into_iter().collect::<Vec<_>>();
 
         // Extend intermediate boundary
         while let Some(tri) = bound_imm.pop_front() {
@@ -2109,225 +2136,6 @@ impl<V, T> TetMesh<V, T> {
         self[vertex].position().coords
     }
 
-    /// Gets whether these points are oriented positive.
-    /// Any vertex is allowed to be the ghost vertex and this should just work™.
-    pub fn orient_3d(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> f64 {
-        let p0 = self.idx_ori(v0);
-        let p1 = self.idx_ori(v1);
-        let p2 = self.idx_ori(v2);
-        let p3 = self.idx_ori(v3);
-        (if [v0, v1, v2, v3].contains(&Self::GHOST) {-1.0} else {1.0}) * robust_geo::orient_3d(p0, p1, p2, p3)
-    }
-
-    /// Gets whether these points are oriented positive.
-    /// Uses simulation of simplicity to avoid ties.
-    /// Any vertex is allowed to be the ghost vertex and this should just work™.
-    pub fn orient_3d_sim(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> bool {
-        [v0, v1, v2, v3].contains(&Self::GHOST)
-            != sim::orient_3d(self, Self::idx_ori, v0, v1, v2, v3)
-    }
-
-    /// Gets the quality of a tet, measured as smallest distance between two opposite simplexes.
-    pub fn quality(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> f64 {
-        if [v0, v1, v2, v3].contains(&Self::GHOST) {
-            if self.center.x.is_nan() || !sim::orient_3d(self, Self::idx_ori, v0, v1, v2, v3) {
-                f64::INFINITY
-            } else {
-                -1.0
-            }
-        } else {
-            // Make sure the number returned is the same given the same tet, no matter the (even) order of the vertices.
-            let [v0, v1, v2, v3] = even_sorted_4([v0, v1, v2, v3]);
-
-            let p0 = self.idx_ori(v0);
-            let p1 = self.idx_ori(v1);
-            let p2 = self.idx_ori(v2);
-            let p3 = self.idx_ori(v3);
-            let volx6 = robust_geo::orient_3d(p0, p1, p2, p3);
-            if volx6 <= 0.0 {
-                return -1.0;
-            }
-
-            //{
-            //    let mut vs = [v0.0, v1.0, v2.0, v3.0];
-            //    vs.sort();
-            //    if vs == [1005, 1006, 1007, 1008] {
-            //        println!("Vertices: {} {} {} {}", v0.0, v1.0, v2.0, v3.0);
-            //        println!("Vol x6: {}", volx6);
-            //        println!("Tri 0 cross: {}", (p2 - p1).cross(&(p3 - p1)).norm());
-            //        println!("Tri 1 cross: {}", (p3 - p2).cross(&(p0 - p2)).norm());
-            //        println!("Tri 2 cross: {}", (p0 - p3).cross(&(p1 - p3)).norm());
-            //        println!("Tri 3 cross: {}", (p1 - p0).cross(&(p2 - p0)).norm());
-            //        println!("Edge 01 cross: {}", (p1 - p0).cross(&(p3 - p2)).norm());
-            //        println!("Edge 02 cross: {}", (p2 - p0).cross(&(p3 - p1)).norm());
-            //        println!("Edge 03 cross: {}", (p3 - p0).cross(&(p1 - p2)).norm());
-            //    }
-            //}
-
-            let max_area = [[p0, p1, p0, p2], [p3, p2, p3, p1], [p2, p3, p2, p0], [p1, p0, p1, p3],
-                [p0, p1, p2, p3], [p0, p2, p1, p3], [p0, p3, p1, p2]].iter().map(|[pa, pb, pc, pd]|
-                    (pb - pa).cross(&(pd - pc)).norm())
-                    .max_by_key(|area| FloatOrd(*area)).unwrap();
-            volx6 / max_area
-        }
-    }
-
-    /// Checks whether these points are oriented positive and do not form a sliver.
-    pub fn non_sliver(&self, v0: VertexId, v1: VertexId, v2: VertexId, v3: VertexId) -> bool {
-        self.quality(v0, v1, v2, v3) >= self.tolerance
-    }
-
-    /// Gets whether the last point is in the circumsphere of the first 4 points.
-    /// Returns 0 in case of a tie.
-    /// [v0, v1, v2, v3] must have positive orientation.
-    /// Assumes that none of the points equal and that the last point isn't the ghost vertex.
-    pub fn in_sphere(
-        &self,
-        v0: VertexId,
-        v1: VertexId,
-        v2: VertexId,
-        v3: VertexId,
-        v4: VertexId,
-    ) -> f64 {
-        let p0 = self.idx_ori(v0);
-        let p1 = self.idx_ori(v1);
-        let p2 = self.idx_ori(v2);
-        let p3 = self.idx_ori(v3);
-        let p4 = self[v4].position().coords;
-        if v0 == Self::GHOST {
-            robust_geo::orient_3d(p3, p2, p1, p4)
-        } else if v1 == Self::GHOST {
-            robust_geo::orient_3d(p2, p3, p0, p4)
-        } else if v2 == Self::GHOST {
-            robust_geo::orient_3d(p1, p0, p3, p4)
-        } else if v3 == Self::GHOST {
-            robust_geo::orient_3d(p0, p1, p2, p4)
-        } else {
-            robust_geo::in_sphere(p0, p1, p2, p3, p4)
-        }
-    }
-
-    /// Gets whether the last point is in the circumsphere of the first 4 points.
-    /// Uses simulation of simplicity to avoid ties.
-    /// [v0, v1, v2, v3] must have positive orientation.
-    /// Assumes that none of the points equal and that the last point isn't the ghost vertex.
-    //pub fn in_sphere_sim(
-    //    &self,
-    //    v0: VertexId,
-    //    v1: VertexId,
-    //    v2: VertexId,
-    //    v3: VertexId,
-    //    v4: VertexId,
-    //) -> bool {
-    //    if v0 == Self::GHOST {
-    //        sim::orient_3d(self, Self::idx, v3, v2, v1, v4)
-    //    } else if v1 == Self::GHOST {
-    //        sim::orient_3d(self, Self::idx, v2, v3, v0, v4)
-    //    } else if v2 == Self::GHOST {
-    //        sim::orient_3d(self, Self::idx, v1, v0, v3, v4)
-    //    } else if v3 == Self::GHOST {
-    //        sim::orient_3d(self, Self::idx, v0, v1, v2, v4)
-    //    } else {
-    //        sim::in_sphere(self, Self::idx, v0, v1, v2, v3, v4)
-    //    }
-    //}
-
-    /// Gets whether the last point is close to the tet formed by the first 4 points using the tolerance.
-    /// The last point can't be the ghost vertex.
-    /// The tet must be oriented positive.
-    pub fn tet_close_to_vertex(
-        &self,
-        v0: VertexId,
-        v1: VertexId,
-        v2: VertexId,
-        v3: VertexId,
-        v4: VertexId,
-    ) -> bool {
-        let p0 = self.idx_ori(v0);
-        let p1 = self.idx_ori(v1);
-        let p2 = self.idx_ori(v2);
-        let p3 = self.idx_ori(v3);
-        let p4 = self.idx_ori(v4);
-        let ghost = [v0, v1, v2, v3].iter().position(|v| *v == Self::GHOST);
-
-        let d0 = ghost.filter(|g| *g != 0)
-            .map_or_else(|| (p2 - p3).cross(&(p1 - p3)).normalize().dot(&(p4 - p3)), |_| -f64::INFINITY);
-        let d1 = ghost.filter(|g| *g != 1)
-            .map_or_else(|| (p3 - p2).cross(&(p0 - p2)).normalize().dot(&(p4 - p2)), |_| -f64::INFINITY);
-        let d2 = ghost.filter(|g| *g != 2)
-            .map_or_else(|| (p0 - p1).cross(&(p3 - p1)).normalize().dot(&(p4 - p1)), |_| -f64::INFINITY);
-        let d3 = ghost.filter(|g| *g != 3)
-            .map_or_else(|| (p1 - p0).cross(&(p2 - p0)).normalize().dot(&(p4 - p0)), |_| -f64::INFINITY);
-        d0.max(d1).max(d2).max(d3) < self.tolerance
-    }
-
-    /// Gets whether the triangle formed by the first 3 points intersects the edge formed by the last 2 points.
-    /// Any vertex can be the ghost vertex.
-    pub fn tri_intersects_edge(
-        &self,
-        v0: VertexId,
-        v1: VertexId,
-        v2: VertexId,
-        v3: VertexId,
-        v4: VertexId,
-    ) -> bool {
-        let positive = self.orient_3d_sim(v2, v1, v0, v3);
-        self.orient_3d_sim(v0, v1, v2, v4) == positive &&
-        self.orient_3d_sim(v0, v1, v3, v4) == positive &&
-        self.orient_3d_sim(v1, v2, v3, v4) == positive &&
-        self.orient_3d_sim(v2, v0, v3, v4) == positive
-    }
-
-    /// Gets whether the last point is in the tet first 4 points.
-    /// The tet must be oriented positive.
-    pub fn tet_intersects_vertex(
-        &self,
-        v0: VertexId,
-        v1: VertexId,
-        v2: VertexId,
-        v3: VertexId,
-        v4: VertexId,
-    ) -> bool {
-        self.orient_3d_sim(v0, v1, v2, v4) &&
-        self.orient_3d_sim(v3, v2, v1, v4) &&
-        self.orient_3d_sim(v2, v3, v0, v4) &&
-        self.orient_3d_sim(v1, v0, v3, v4)
-    }
-
-    /// Returns a collection of the edges that intersect a certain triangle.
-    /// Assumes the edges are recovered.
-    /// The edge vertices are sorted.
-    pub fn edges_intersecting_tri(&self, tri: [VertexId; 3]) -> Vec<[VertexId; 2]> {
-        let walker = self.walker_from_edge([tri[0], tri[1]]).unwrap();
-        
-        // Find first intersection
-        if let Some(walker) = walker.edge_ring(self).map(TetWalker::to_opp_edge).find(|walker| {
-            let edge = walker.edge(self);
-            // Only the third point of the triangle can possibly be part of the edge here
-            !edge.contains(&tri[2]) &&
-                self.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1])
-        }) {
-            let mut visited = FnvHashSet::default();
-            let mut to_search = vec![walker];
-
-            while let Some(walker) = to_search.pop() {
-                if visited.insert(sorted_2(walker.edge(self))) {
-                    to_search.extend(walker.edge_ring(self).flat_map(|walker| 
-                        vec![walker.to_nfe(), walker.to_pfe()])
-                        .filter(|walker| {
-                            let edge = walker.edge(self);
-                            !tri.contains(&edge[0]) && !tri.contains(&edge[1]) &&
-                                self.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1])
-                        }));
-                }
-            }
-
-            visited.into_iter().collect::<Vec<_>>()
-        } else {
-            vec![]
-        }
-    }
-
     /// Flips in a vertex using one big mega flip.
     /// The boundary must be manifold.
     /// For now, no vertex can be completely enclosed.
@@ -2692,9 +2500,11 @@ impl<V, T> TetMesh<V, T> {
         };
 
         // Find all non-Delaunay tets
-        let (mut boundary, enclosed) =
-            self.walker_from_tet_id(not_delaunay)
-                .point_cavity(self, true, id);
+        let walker = self.walker_from_tet_id(not_delaunay);
+        // The initial boundary might not be star-shaped, but the final boundary will be.
+        let (mut boundary, enclosed) = TetWalker::point_cavity(
+            (0..4).map(|i| walker.to_edge(i)), iter::once(not_delaunay), self,
+                true, false, id);
 
         // Add the new vertex
         self.flip_in_vertex_unchecked(id, &mut boundary, &enclosed);
@@ -2828,66 +2638,265 @@ impl<V, T> TetMesh<V, T> {
     /// Expects both vertices to be solid vertices.
     pub fn recover_and_lock_edge(&mut self, edge: [VertexId; 2], depth: usize) -> bool where V: Clone, T: Clone {
         // Don't store walkers because they get invalidated by flips.
-        let mut intersecting: Vec<[VertexId; 3]> = vec![];
+        let mut intersecting = self.edge_intersections_raw(edge[0], edge[1])
+            .into_iter().map(|inter| inter.other)
+            .collect::<Vec<_>>();
+        let mut stubborn = vec![];
 
-        loop {
-            if let Some(tri) = intersecting.last().copied() {
-                // Look for an intersecting triangle from this one, which couldn't be removed
-                let walker = self.walker_from_tri(tri).unwrap().to_adj_ae(self);
-                if walker.fourth(self) == edge[1] {
-                    return false;
-                }
+        while let Some(inter) = intersecting.pop() {
+            stubborn.push(inter);
 
-                let mut reached = false;
-                for walker in &[walker.to_twin_edge(), walker.to_opp_edge(), walker.to_perm(Permutation::_3210)] {
-                    let tri = walker.tri(self);
-                    if self.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1]) {
-                        intersecting.push(tri);
-                        reached = true;
-                        break;
-                    }
-                }
-                assert!(reached);
-            } else {
-                // Look for an intersecting triangle from the vertex.
-                if let Some(tri) = self.walkers_from_vertex(edge[0])
-                    .map(|w| w.opp_tri(self))
-                    .find(|tri| {
-                        !tri.contains(&edge[1]) &&
-                        self.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1])
-                    })
-                {
-                    intersecting.push(tri);
-                } else {
-                    // No triangle intersects the edge, so the edge must exist now.
-                    let walker = self.walker_from_edge(edge).unwrap();
-                    self.edges[walker.undir_edge(self)].set_flags(UndirEdgeFlags::LOCKED);
-                    return true;
-                }
-            };
+            // Remove as many intersecting triangles and edges as possible until blocked.
+            while let Some(stub) = stubborn.pop() {
+                match stub {
+                    EdgeOrTri::Tri(stub) => if let Some(walker) = self.walker_from_tri(stub) {
+                        if let Some(goal_index) = walker.progress_by_removing_tri(
+                            self,
+                            |mesh, e| 
+                                e.contains(&edge[0]) || e.contains(&edge[1]) ||
+                                !mesh.edge_intersects_edge(e[0], e[1], edge[0], edge[1]),
+                            |mesh, tri| 
+                                tri.contains(&edge[0]) || tri.contains(&edge[1]) ||
+                                !mesh.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1]),
+                            depth,
+                            &mut vec![],
+                            &mut vec![],
+                        ) {
+                            assert_eq!(goal_index, 0);
+                        } else {
+                            // get blokt
+                            stubborn.push(EdgeOrTri::Tri(stub));
+                            break;
+                        }
+                    },
 
-            // Remove as many intersecting triangles as possible until blocked.
-            while let Some(tri) = intersecting.pop() {
-                if let Some(walker) = self.walker_from_tri(tri) {
-                    if let Some(goal_index) = walker.progress_by_removing_tri(
-                        self,
-                        |_, _| true,
-                        |mesh, tri| 
-                            tri.contains(&edge[0]) || tri.contains(&edge[1]) ||
-                            !mesh.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1]),
-                        depth,
-                        &mut vec![],
-                        &mut vec![],
-                    ) {
-                        assert_eq!(goal_index, 0);
-                    } else {
-                        // get blokt
-                        intersecting.push(tri);
-                        break;
+                    EdgeOrTri::Edge(stub) => if let Some(walker) = self.walker_from_edge(stub) {
+                        if let Some(goal_index) = walker.progress_by_removing_edge(
+                            self,
+                            |mesh, e| 
+                                e.contains(&edge[0]) || e.contains(&edge[1]) ||
+                                !mesh.edge_intersects_edge(e[0], e[1], edge[0], edge[1]),
+                            |mesh, tri| 
+                                tri.contains(&edge[0]) || tri.contains(&edge[1]) ||
+                                !mesh.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1]),
+                            depth,
+                            &mut vec![],
+                            &mut vec![],
+                        ) {
+                            assert_eq!(goal_index, 0);
+                        } else {
+                            stubborn.push(EdgeOrTri::Edge(stub));
+                            break;
+                        }
                     }
                 }
             }
         }
+
+        if stubborn.is_empty() {
+            // No triangle intersects the edge, so the edge must exist now.
+            let walker = self.walker_from_edge(edge).unwrap();
+            self.edges[walker.undir_edge(self)].set_flags(UndirEdgeFlags::LOCKED);
+            return true;
+        }
+
+        false
+    }
+
+    fn assert_edge_removable_by_edge_steiner(&self, walker: TetWalker, edge: [VertexId; 2]) {
+        assert!(!self.edges[walker.undir_edge(self)].flags.get().intersects(UndirEdgeFlags::LOCKED),
+            "Tried to insert Steiner point on edge {}-{} too close to edge {}-{}", edge[0], edge[1],
+            walker.first(self), walker.second(self));
+    }
+
+    fn assert_tri_removable_by_edge_steiner(&self, walker: TetWalker, edge: [VertexId; 2]) {
+        assert!(!self.tets[walker.id()].flags.get().intersects(unsafe {
+            // Safety: tri.edge % 4 is in 0..4, and TetFlags::LOCKED_0.bits << i for i in 0..4 is a valid flag.
+            TetFlags::from_bits_unchecked(TetFlags::LOCKED_0.bits << walker.edge % 4)
+        }), "Tried to insert Steiner point on edge {}-{} too close to tri {}-{}-{}", edge[0], edge[1],
+            walker.first(self), walker.second(self), walker.third(self));
+    }
+
+    fn assert_edge_removable_by_tri_steiner(&self, walker: TetWalker, tri: [VertexId; 3]) {
+        assert!(!self.edges[walker.undir_edge(self)].flags.get().intersects(UndirEdgeFlags::LOCKED),
+            "Tried to insert Steiner point on tri {}-{}-{} too close to edge {}-{}", tri[0], tri[1], tri[2],
+            walker.first(self), walker.second(self));
+    }
+
+    fn assert_tri_removable_by_tri_steiner(&self, walker: TetWalker, tri: [VertexId; 3]) {
+        assert!(!self.edges[walker.undir_edge(self)].flags.get().intersects(UndirEdgeFlags::LOCKED),
+            "Tried to insert Steiner point on tri {}-{}-{} too close to tri {}-{}-{}", tri[0], tri[1], tri[2],
+            walker.first(self), walker.second(self), walker.third(self));
+    }
+
+    /// Recovers an edge by inserting Steiner points on it until it finally shows up.
+    /// Returns inserted Steiner points in order from edge[0] to edge[1].
+    /// Locks all the segments of the edge.
+    pub fn recover_edge_with_steiner_points(&mut self, edge: [VertexId; 2]) -> Vec<VertexId> where V: Clone, T: Clone {
+        if let Some(inter) = self.edge_mid_intersection(edge[0], edge[1]) {
+            let steiner = self.vertices.insert(Vertex::new(TetWalker::new(TetId::invalid(), 0), inter.point,
+                self[edge[0]].value().clone()));
+
+            let (mut boundary, enclosure) = match inter.other {
+                EdgeOrTri::Edge(e) => {
+                    let walker = self.walker_from_edge(e).unwrap();
+                    self.assert_edge_removable_by_edge_steiner(walker, edge);
+                    for tri_walker in walker.edge_ring(self) {
+                        self.assert_tri_removable_by_edge_steiner(tri_walker, edge);
+                    }
+
+                    TetWalker::point_cavity(
+                        walker.edge_ring(self).flat_map(|w| vec![w.to_opp_edge(), w.to_perm(Permutation::_3210)]),
+                        walker.edge_ring(self).map(|w| w.id()),
+                        self, false, true, steiner
+                    )
+                }
+
+                EdgeOrTri::Tri(tri) => {
+                    let walker = self.walker_from_tri(tri).unwrap();
+                    let adj = walker.to_adj_ae(self);
+                    self.assert_tri_removable_by_edge_steiner(walker, edge);
+
+                    TetWalker::point_cavity(
+                        vec![walker.to_twin_edge(), walker.to_opp_edge(), walker.to_perm(Permutation::_3210),
+                            adj.to_twin_edge(), adj.to_opp_edge(), adj.to_perm(Permutation::_3210)],
+                        vec![walker.id(), adj.id()],
+                        self, false, true, steiner
+                    )
+                },
+            };
+
+            self.flip_in_vertex_unchecked(steiner, &mut boundary, &enclosure);
+
+            let mut result = self.recover_edge_with_steiner_points([edge[0], steiner]);
+            result.push(steiner);
+            result.extend(self.recover_edge_with_steiner_points([steiner, edge[1]]));
+            result
+        } else {
+            let walker = self.walker_from_edge(edge).unwrap();
+            self.edges[walker.undir_edge(self)].set_flags(UndirEdgeFlags::LOCKED);
+            vec![]
+        }
+    }
+
+    /// Recovers a triangle by inserting Steiner points on it until it finally shows up.
+    /// Returns inserted Steiner points in [tri[0]->tri[1], tri[1]->tri[2], tri[2]->tri[0], inside tri] order
+    pub fn recover_tri_with_steiner_points(&mut self, tri: [VertexId; 3]) -> [Vec<VertexId>; 4] where V: Clone, T: Clone {
+        let locked_flag = |edge| unsafe {
+            // Safety: tri.edge % 4 is in 0..4, and TetFlags::LOCKED_0.bits << i for i in 0..4 is a valid flag.
+            TetFlags::from_bits_unchecked(TetFlags::LOCKED_0.bits << edge % 4)
+        };
+
+        let mut result = [
+            self.recover_edge_with_steiner_points([tri[0], tri[1]]),
+            self.recover_edge_with_steiner_points([tri[1], tri[2]]),
+            self.recover_edge_with_steiner_points([tri[2], tri[0]]),
+            vec![],
+        ];
+
+        // Loop of vertices around the triangle
+        let mut vertices = iter::once(tri[0]).chain(result[0].clone())
+            .chain(iter::once(tri[1])).chain(result[1].clone())
+            .chain(iter::once(tri[2])).chain(result[2].clone()).collect::<Vec<_>>();
+
+        // Edges left on boundary
+        let mut edges = vertices.iter().zip(vertices.iter().cycle().skip(1))
+            .map(|(v0, v1)| [*v0, *v1]).collect::<FnvHashSet<_>>();
+
+        // Set up triangle recovery engine
+        let transform = self.tri_xy(tri[0], tri[1], tri[2]);
+
+        let mut cdt = FloatCDT::with_walk_locate();
+        let mut vertex_map = vertices.iter().map(|v| {
+            let position = transform * self[*v].position();
+            (*v, cdt.insert([position.x, position.y]))
+        }).collect::<FnvHashMap<_, _>>();
+
+        let mut inv_map = vertex_map.iter().map(|(k, v)| (*v, *k)).collect::<FnvHashMap<_, _>>();
+
+        for [v0, v1] in &edges {
+            cdt.add_constraint(vertex_map[v0], vertex_map[v1]);
+        }
+
+        while !edges.is_empty() {
+            let edge = *edges.iter().next().unwrap();
+
+            // Recover piece of triangle on that edge
+            let mut region = FnvHashSet::default();
+            let mut to_search = vec![cdt.get_edge_from_neighbors(vertex_map[&edge[0]], vertex_map[&edge[1]]).unwrap().fix()];
+            while let Some(e) = to_search.pop() {
+                let cdt_e = cdt.edge(e);
+                if region.insert(cdt_e.face().fix()) {
+                    for adj in cdt_e.face().adjacent_edges() {
+                        if !cdt.is_constraint_edge(adj.fix()) {
+                            to_search.push(adj.fix());
+                        }
+                    }
+                }
+            }
+
+            let tris = region.into_iter().map(|tri| {
+                let tri = cdt.face(tri).as_triangle();
+                [inv_map[&tri[0].fix()], inv_map[&tri[1].fix()], inv_map[&tri[2].fix()]]
+            }).collect::<Vec<_>>();
+
+            if let Some(inter) = self.tris_intersections(&tris, edge).first().cloned() {
+                // New Steiner point!
+                let steiner = self.vertices.insert(Vertex::new(TetWalker::new(TetId::invalid(), 0), inter.point,
+                    self[tri[0]].value().clone()));
+                let transformed = transform * inter.point;
+                let cdt_steiner = cdt.insert([transformed.x, transformed.y]);
+                vertex_map.insert(steiner, cdt_steiner);
+                inv_map.insert(cdt_steiner, steiner);
+                result[3].push(steiner);
+                vertices.push(steiner);
+
+                let walker = self.walker_from_edge(inter.edge).unwrap();
+                self.assert_edge_removable_by_tri_steiner(walker, tri);
+                for tri_walker in walker.edge_ring(self) {
+                    self.assert_tri_removable_by_tri_steiner(tri_walker, tri);
+                }
+
+                let (mut boundary, enclosure) = TetWalker::point_cavity(
+                    walker.edge_ring(self).flat_map(|w| vec![w.to_opp_edge(), w.to_perm(Permutation::_3210)]),
+                    walker.edge_ring(self).map(|w| w.id()),
+                    self, false, true, steiner
+                );
+
+                self.flip_in_vertex_unchecked(steiner, &mut boundary, &enclosure);
+            } else {
+                // Triangle piece recovered!
+                let walker = self.walker_from_edge(edge).unwrap().edge_ring(self).find(|w| {
+                    // The piece needs to be inside
+                    vertices.contains(&w.third(self)) &&
+                        robust_geo::orient_2d(
+                            Vector2::from(*cdt.vertex(vertex_map[&edge[0]])),
+                            Vector2::from(*cdt.vertex(vertex_map[&edge[1]])),
+                            Vector2::from(*cdt.vertex(vertex_map[&w.third(self)])),
+                        ) > 0.0
+                }).expect("Triangle piece not recovered but no intersections?!");
+                let adj = walker.to_adj_ae(self);
+
+                self.tets[walker.id()].set_flags(locked_flag(walker.edge));
+                self.tets[adj.id()].set_flags(locked_flag(adj.edge));
+
+                // Don't even allow 4-to-4 flips among these pieces, as that disrupts the engine
+                self.edges[walker.undir_edge(self)].set_flags(UndirEdgeFlags::LOCKED);
+                self.edges[walker.to_nfe().undir_edge(self)].set_flags(UndirEdgeFlags::LOCKED);
+                self.edges[walker.to_pfe().undir_edge(self)].set_flags(UndirEdgeFlags::LOCKED);
+
+                let v2 = walker.third(self);
+
+                for [v0, v1] in &[[edge[0], edge[1]], [edge[1], v2], [v2, edge[0]]] {
+                    cdt.add_constraint(vertex_map[v1], vertex_map[v0]);
+                    if !edges.remove(&[*v0, *v1]) {
+                        edges.insert([*v1, *v0]);
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Attempts to recover a triangle
@@ -2921,7 +2930,9 @@ impl<V, T> TetMesh<V, T> {
                 return true;
             }
 
-            let mut intersecting = self.edges_intersecting_tri(tri);
+            let mut intersecting = self.tri_intersections_raw(tri[0], tri[1], tri[2])
+                .into_iter().map(|inter| inter.edge)
+                .collect::<Vec<_>>();
             let mut stubborn = vec![];
 
             while let Some(inter) = intersecting.pop() {
@@ -2932,7 +2943,7 @@ impl<V, T> TetMesh<V, T> {
                         if let Some(goal_index) = walker.progress_by_removing_edge(
                             self,
                             |mesh, edge| tri.contains(&edge[0]) || tri.contains(&edge[1]) ||
-                                !mesh.tri_intersects_edge(tri[0], tri[1], tri[2], edge[0], edge[1]),
+                                !mesh.tri_intersects_edge_sim(tri[0], tri[1], tri[2], edge[0], edge[1]),
                             |_, _| true,
                             *depth,
                             &mut vec![],
@@ -3299,9 +3310,11 @@ impl<V, T> TetMesh<V, T> {
             for i in 0..4 {
                 let walker = TetWalker::new(id, i);
                 let adj = walker.to_adj_ae(self);
+                let vs = walker.tet(self);
                 assert_eq!(self[walker.id()].flags.get().intersects(locked_flag(walker.edge)),
-                    self[adj.id()].flags.get().intersects(locked_flag(walker.edge)),
-                    "Tet {} tri {} and its adjacent tet do not have matching locked flags on the tri.", id, i);
+                    self[adj.id()].flags.get().intersects(locked_flag(adj.edge)),
+                    "Tet {} (vertices {} {} {} {}) tri {} and its adjacent tet do not have matching locked flags on the tri.",
+                        id, vs[0], vs[1], vs[2], vs[3], i);
             }
 
             for i in 0..12 {
@@ -4709,62 +4722,5 @@ mod tests {
         // Expect the Delaunay tetrahedralization
         assert_tets_ids(&mesh, tets);
         mesh.assert_integrity(true);
-    }
-
-    #[test]
-    fn test_edges_intersecting_tri_none() {
-        let mesh = TetMesh::<(), ()>::delaunay_from_vertices(
-            vec![
-                (Pt3::new(1.0, 0.0, 0.0), ()),
-                (Pt3::new(-1.0, 1.0, 0.0), ()),
-                (Pt3::new(-1.0, -1.0, 0.0), ()),
-                (Pt3::new(0.0, 0.0, 2.0), ()),
-                (Pt3::new(0.0, 0.0, -2.0), ()),
-            ],
-            0.0,
-            || (),
-        );
-
-        let edges = mesh.edges_intersecting_tri([v(0), v(1), v(2)]);
-        assert_eq!(edges, vec![] as Vec<[VertexId; 2]>);
-    }
-
-    #[test]
-    fn test_edges_intersecting_tri_one() {
-        let mesh = TetMesh::<(), ()>::delaunay_from_vertices(
-            vec![
-                (Pt3::new(1.0, 0.0, 0.0), ()),
-                (Pt3::new(-1.0, 1.0, 0.0), ()),
-                (Pt3::new(-1.0, -1.0, 0.0), ()),
-                (Pt3::new(0.0, 0.0, 0.2), ()),
-                (Pt3::new(0.0, 0.0, -0.2), ()),
-            ],
-            0.0,
-            || (),
-        );
-
-        let edges = mesh.edges_intersecting_tri([v(0), v(1), v(2)]);
-        assert_eq!(edges, vec![[v(3), v(4)]]);
-    }
-
-    #[test]
-    fn test_edges_intersecting_tri_some() {
-        let mesh = TetMesh::<(), ()>::delaunay_from_vertices(
-            vec![
-                (Pt3::new(1.0, 0.0, 0.0), ()),
-                (Pt3::new(-1.0, 1.0, 0.0), ()),
-                (Pt3::new(-1.0, -1.0, 0.0), ()),
-                (Pt3::new(-0.1, 0.0, 0.2), ()),
-                (Pt3::new(0.1, 0.0, 0.2), ()),
-                (Pt3::new(0.0, 0.0, -0.2), ()),
-            ],
-            0.0,
-            || (),
-        );
-
-        let edges = mesh.edges_intersecting_tri([v(0), v(1), v(2)]);
-        assert_eq!(edges.into_iter().collect::<FnvHashSet<_>>(), vec![
-            [v(3), v(5)], [v(4), v(5)]
-        ].into_iter().collect::<FnvHashSet<_>>());
     }
 }

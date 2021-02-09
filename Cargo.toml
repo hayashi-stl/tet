@@ -14,13 +14,13 @@ debug = true
 [dependencies]
 fnv = "1.0"
 nalgebra = "0.24"
-simplicity = "0.4.1"
+simplicity = "0.4.2"
 float-ord = "0.2"
 hilbert = "0.1.1"
 bitflags = "1.2.1"
 ncollide3d = "0.27.0"
 stable-vec = "0.4.0"
-robust-geo = "0.1.6"
+robust-geo = "0.1.7"
 spade = "1.8.2"
 obj = { version = "0.10.2", optional = true }
 
@@ -30,6 +30,7 @@ rand_pcg = "0.3.0"
 rand_distr = "0.4.0"
 criterion = "0.3"
 pathfinding = "2.1.1"
+approx = "0.4.0"
 
 [[bench]]
 name = "delaunay_tets"
