@@ -611,6 +611,20 @@ impl<V, T> TetMesh<V, T> {
             }
         }).collect::<Vec<_>>()
     }
+
+    /// Gets the amount of time that `center` has to travel toward `target` to not be star-shaped relative to
+    /// `ball_vertex`.
+    /// Returns None if no such time exists.
+    pub fn time_until_not_star_shaped(&self, ball_vertex: VertexId, center: VertexId, target: VertexId) -> Option<f64> {
+        self.walkers_from_vertex(ball_vertex).map(|walker| {
+            let tri = walker.opp_tri(self);
+            let bary = self.tri_edge_bary(tri[0], tri[1], tri[2], center, target);
+            bary
+        }).filter(|bary| bary.iter().all(|c| *c >= 0.0) || bary.iter().all(|c| *c <= 0.0))
+            .map(|bary| bary[4] / (bary[3] + bary[4]))
+            .filter(|time| *time > 0.0 && time.is_finite())
+            .min_by_key(|time| FloatOrd(*time))
+    }
 }
 
 #[cfg(test)]
