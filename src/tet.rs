@@ -2,7 +2,7 @@ pub mod geo;
 
 use bitflags::bitflags;
 use float_ord::FloatOrd;
-use nalgebra::Vector2;
+use nalgebra::{Isometry3, Vector2};
 use spade::delaunay::{DelaunayWalkLocate, FloatCDT};
 use std::ops::Index;
 use std::{
@@ -509,6 +509,29 @@ impl TetWalker {
     /// Gets the current undirected edge id.
     fn undir_edge<V, T>(self, mesh: &TetMesh<V, T>) -> UndirEdgeId {
         unsafe { mesh.tets.get_unchecked(self.id()).edges[self.undir_edge_index()] }
+    }
+
+    fn to_undir_edge(self, undir_edge_index: u32) -> Self {
+        match undir_edge_index {
+            0 => self.to_edge(0),
+            1 => self.to_edge(3),
+            2 => self.to_edge(7),
+            3 => self.to_edge(5),
+            4 => self.to_edge(8),
+            5 => self.to_edge(11),
+            _ => unreachable!(),
+        }
+    }
+
+    fn undir_edges<V, T>(self, mesh: &TetMesh<V, T>) -> [UndirEdgeId; 6] {
+        [
+            self.to_opp_edge().undir_edge(mesh),
+            self.undir_edge(mesh),
+            self.to_nfe().undir_edge(mesh),
+            self.to_pve().undir_edge(mesh),
+            self.to_perm(Permutation::_1320).undir_edge(mesh),
+            self.to_pfe().undir_edge(mesh),
+        ]
     }
 
     crate::alias! {
@@ -2791,11 +2814,34 @@ impl<V, T> TetMesh<V, T> {
         }
     }
 
+    fn cdt_region(v0: VertexId, v1: VertexId, cdt: &FloatCDT<[f64; 2], DelaunayWalkLocate>, vertex_map: &FnvHashMap<VertexId, usize>,
+        inv_map: &FnvHashMap<usize, VertexId>) -> Vec<[VertexId; 3]>
+    {
+        let mut region = FnvHashSet::default();
+        let mut to_search = vec![cdt.get_edge_from_neighbors(vertex_map[&v0], vertex_map[&v1]).unwrap().fix()];
+        while let Some(e) = to_search.pop() {
+            let cdt_e = cdt.edge(e);
+            if region.insert(cdt_e.face().fix()) {
+                for adj in cdt_e.face().adjacent_edges() {
+                    if !cdt.is_constraint_edge(adj.fix()) {
+                        to_search.push(adj.fix());
+                    }
+                }
+            }
+        }
+
+        region.into_iter().map(|tri| {
+            let tri = cdt.face(tri).as_triangle();
+            [inv_map[&tri[0].fix()], inv_map[&tri[1].fix()], inv_map[&tri[2].fix()]]
+        }).collect::<Vec<_>>()
+    }
+
     /// Recovers a triangle by inserting Steiner points on it until it finally shows up.
     /// Returns inserted Steiner points in [tri[0]->tri[1], tri[1]->tri[2], tri[2]->tri[0], inside tri] order
-    /// Also returns the helper CDT, the forward vertex id map to the CDT, and the inverse vertex id map.
+    /// Also returns the helper CDT, the forward vertex id map to the CDT, the inverse vertex id map, and the 3D-to-2D transform of the triangle.
     pub fn recover_tri_with_steiner_points(&mut self, tri: [VertexId; 3])
-    -> ([Vec<VertexId>; 4], FloatCDT<[f64; 2], DelaunayWalkLocate>, FnvHashMap<VertexId, usize>, FnvHashMap<usize, VertexId>) where V: Clone, T: Clone {
+    -> ([Vec<VertexId>; 4], FloatCDT<[f64; 2], DelaunayWalkLocate>, FnvHashMap<VertexId, usize>, FnvHashMap<usize, VertexId>,
+        Isometry3<f64>) where V: Clone, T: Clone {
         let locked_flag = |edge| unsafe {
             // Safety: tri.edge % 4 is in 0..4, and TetFlags::LOCKED_0.bits << i for i in 0..4 is a valid flag.
             TetFlags::from_bits_unchecked(TetFlags::LOCKED_0.bits << edge % 4)
@@ -2836,23 +2882,7 @@ impl<V, T> TetMesh<V, T> {
             let edge = *edges.iter().next().unwrap();
 
             // Recover piece of triangle on that edge
-            let mut region = FnvHashSet::default();
-            let mut to_search = vec![cdt.get_edge_from_neighbors(vertex_map[&edge[0]], vertex_map[&edge[1]]).unwrap().fix()];
-            while let Some(e) = to_search.pop() {
-                let cdt_e = cdt.edge(e);
-                if region.insert(cdt_e.face().fix()) {
-                    for adj in cdt_e.face().adjacent_edges() {
-                        if !cdt.is_constraint_edge(adj.fix()) {
-                            to_search.push(adj.fix());
-                        }
-                    }
-                }
-            }
-
-            let tris = region.into_iter().map(|tri| {
-                let tri = cdt.face(tri).as_triangle();
-                [inv_map[&tri[0].fix()], inv_map[&tri[1].fix()], inv_map[&tri[2].fix()]]
-            }).collect::<Vec<_>>();
+            let tris = Self::cdt_region(edge[0], edge[1], &cdt, &vertex_map, &inv_map);
 
             if let Some(inter) = self.tris_intersections(&tris, edge).first().cloned() {
                 // New Steiner point!
@@ -2911,13 +2941,103 @@ impl<V, T> TetMesh<V, T> {
             }
         }
 
-        (result, cdt, vertex_map, inv_map)
+        (result, cdt, vertex_map, inv_map, transform)
+    }
+
+    fn insert_tet(&mut self, vertices: [VertexId; 4], edge_map: &mut FnvHashMap<[VertexId; 2], UndirEdgeId>) -> TetWalker {
+        let tet = self.tets.insert(Tet::new(vertices,
+            [TetWalker::new(TetId::invalid(), 0); 4], [UndirEdgeId::invalid(); 6], (self.default_tet)()));
+
+        // Fix adjacencies and vertices
+        for i in 0..4 {
+            let walker = TetWalker::new(tet, i as u32);
+            if let Some(adj) = self.walker_from_tri([walker.second(self), walker.first(self), walker.third(self)]) {
+                self.tets[walker.id()].opp_tets[i] = adj;
+                self.tets[adj.id()].opp_tets[adj.edge as usize % 4] = match adj.edge / 4 {
+                    0 => walker,
+                    1 => walker.to_nfe(),
+                    2 => walker.to_pfe(),
+                    _ => unreachable!(),
+                };
+            }
+            self.tri_map.insert(TriVertices::new(walker.tri(self)), walker);
+
+            self.vertices[vertices[i]].tet = walker.to_perm(Permutation::_3210);
+        }
+
+        // Fix edges
+        for i in 0..6 {
+            let walker = TetWalker::new(tet, 3).to_undir_edge(i as u32);
+            let edge = sorted_2([walker.first(self), walker.second(self)]);
+            let id = *edge_map.entry(edge).or_insert_with(|| {
+                let id = self.edges.insert(UndirEdge::new(edge));
+                id
+            });
+            self.tets[walker.id()].edges[i] = id;
+        }
+
+        // Doesn't copy locked flags because this function is intended to be called with a Steiner vertex
+
+        TetWalker::new(tet, 3)
+    }
+
+    /// Performs a cap transform on a configuration with some side vertices in ccw order, a vertex above them and a vertex below them.
+    /// Handles locking/unlocking automatically.
+    fn cap_transform(&mut self, v_side: &[VertexId], vt: VertexId, vb: VertexId, tris: &[[VertexId; 3]]) {
+        let locked_flag = |edge| unsafe {
+            // Safety: tri.edge % 4 is in 0..4, and TetFlags::LOCKED_0.bits << i for i in 0..4 is a valid flag.
+            TetFlags::from_bits_unchecked(TetFlags::LOCKED_0.bits << edge % 4)
+        };
+
+        let mut edge_map = FnvHashMap::default();
+
+        // Unlock Steiner-pointed edges and triangles
+        for (v0, v1) in v_side.iter().zip(v_side.iter().skip(1)) {
+            println!("v0 {}, v1 {}, vt {}, vb {}", v0, v1, vt, vb);
+            let walker = self.walker_from_tri([*v1, vt, *v0]).unwrap();
+            let adj = walker.to_adj_ae(self);
+
+            self.edges[walker.undir_edge(self)].clear_flags(UndirEdgeFlags::LOCKED);
+            self.edges[walker.to_nfe().undir_edge(self)].clear_flags(UndirEdgeFlags::LOCKED);
+            self.tets[walker.id()].clear_flags(locked_flag(walker.edge));
+            self.tets[adj.id()].clear_flags(locked_flag(adj.edge));
+
+            // Track involved edges
+            for edge in &walker.undir_edges(self) {
+                let vs = self.edges[*edge].vertices;
+                edge_map.insert(sorted_2(vs), *edge);
+            }
+            
+            // Remove the old tet in the process
+            for i in 0..4 {
+                // Better be tracking this at this point
+                self.tri_map.remove(&TriVertices::new(walker.to_edge(i).tri(self)));
+            }
+            self.tets.remove(walker.id());
+        }
+
+        // Insert special tet
+        self.insert_tet([v_side[0], v_side[v_side.len() - 1], vt, vb], &mut edge_map);
+
+        // Insert tets at triangles and lock them appropriately
+        for [v0, v1, v2] in tris {
+            let walker = self.insert_tet([*v1, *v0, *v2, vt], &mut edge_map);
+            self.tets[walker.id()].set_flags(locked_flag(walker.edge));
+            let walker = self.insert_tet([*v0, *v1, *v2, vb], &mut edge_map);
+            self.tets[walker.id()].set_flags(locked_flag(walker.edge));
+
+            // Lock edges to prevent 4-to-4 flips from messing things up
+            for [v0, v1] in &[[*v0, *v1], [*v1, *v2], [*v2, *v0]] {
+                self.edges[edge_map[&sorted_2([*v0, *v1])]].set_flags(UndirEdgeFlags::LOCKED);
+            }
+        }
     }
 
     /// Takes the Steiner points inserted by triangle recovery and moves them into the volume, suppressing them.
     /// Returns the new Steiner points.
-    pub fn move_steiner_points_inside_volume(&mut self, tri: [VertexId; 3], mut steiner: [Vec<VertexId>; 4],
-        cdt: FloatCDT<[f64; 2], DelaunayWalkLocate>, vertex_map: FnvHashMap<VertexId, usize>, inv_map: FnvHashMap<usize, VertexId>) -> Vec<VertexId>
+    pub fn move_steiner_points_inside_volume(&mut self, tri: [VertexId; 3], steiner: [Vec<VertexId>; 4],
+        mut cdt: FloatCDT<[f64; 2], DelaunayWalkLocate>, mut vertex_map: FnvHashMap<VertexId, usize>, mut inv_map: FnvHashMap<usize, VertexId>,
+        xy_transform: Isometry3<f64>) -> Vec<VertexId>
     where V: Clone, T: Clone,
     {
         //let locked_flag = |edge| unsafe {
@@ -2958,7 +3078,7 @@ impl<V, T> TetMesh<V, T> {
                     .map(|e| e.fix()).collect::<Vec<_>>();
 
                 // Insert new point
-                let (boundary, enclosure) = TetWalker::point_cavity(
+                let (mut boundary, enclosure) = TetWalker::point_cavity(
                     self.walkers_from_vertex(point).map(|w| w.to_perm(Permutation::_3210)),
                     self.vertex_tets(point),
                     cdt_edges.iter().map(|e| {
@@ -2968,6 +3088,25 @@ impl<V, T> TetMesh<V, T> {
                     }),
                     self, false, true, false, sym
                 );
+
+                self.flip_in_vertex_unchecked(sym, &mut boundary, &enclosure);
+
+                // Triangulate region and obtain cap triangles
+                let mut cap_vertices = cdt_edges.into_iter().map(|e| inv_map[&cdt.edge(e).to().fix()]).collect::<Vec<_>>();
+                cap_vertices.push(edge[0]);
+                cdt.remove(vertex_map[&point]);
+                vertex_map.remove(&point);
+
+                // Oof, that invalidated all the handles; recalculate
+                vertex_map = vertex_map.into_iter().map(|(vertex, _)| {
+                    let position = xy_transform * self[vertex].position();
+                    (vertex, cdt.locate_vertex(&[position.x, position.y]).unwrap().fix())
+                }).collect();
+                inv_map = vertex_map.iter().map(|(k, v)| (*v, *k)).collect();
+
+                // Now obtain the triangles
+                let tris = Self::cdt_region(edge[0], next, &cdt, &vertex_map, &inv_map);
+                self.cap_transform(&cap_vertices, point, sym, &tris);
             }
         }
 
@@ -3718,6 +3857,23 @@ mod tests {
             .tets
             .iter()
             .map(|(_, tet)| even_sort_4(tet.vertices()))
+            .collect::<FnvHashSet<_>>();
+        let expect = tets.into_iter().collect::<Vec<_>>();
+        assert_eq!(result.len(), expect.len());
+        let expect = expect
+            .into_iter()
+            .map(|[v0, v1, v2, v3]| even_sort_4([v(v0), v(v1), v(v2), v(v3)]))
+            .collect::<FnvHashSet<_>>();
+        assert_eq!(result, expect);
+    }
+
+    #[track_caller]
+    fn assert_tets_non_ghost<V, T, I: IntoIterator<Item = [u32; 4]>>(mesh: &TetMesh<V, T>, tets: I) {
+        let result = mesh
+            .tets
+            .iter()
+            .map(|(_, tet)| even_sort_4(tet.vertices()))
+            .filter(|vs| !vs.contains(&TetMesh::<V, T>::GHOST))
             .collect::<FnvHashSet<_>>();
         let expect = tets.into_iter().collect::<Vec<_>>();
         assert_eq!(result.len(), expect.len());
@@ -4796,6 +4952,59 @@ mod tests {
         );
         // Expect the Delaunay tetrahedralization
         assert_tets_ids(&mesh, tets);
+        mesh.assert_integrity(true);
+    }
+
+    #[test]
+    fn test_cap_transform_23() {
+        // Cap transform is just a 2-to-3 flip here
+        let mut mesh = TetMesh::<(), ()>::delaunay_from_vertices(
+            vec![
+                (Pt3::new(0.0, 0.0, 0.1), ()),
+                (Pt3::new(0.0, 0.0, -0.1), ()),
+                (Pt3::new(1.0, -1.0, 0.0), ()),
+                (Pt3::new(1.5, 0.0, 0.0), ()),
+                (Pt3::new(1.0, 1.0, 0.0), ()),
+            ],
+            0.0,
+            || (),
+        );
+        mesh.set_track_tri_map(true);
+        mesh.cap_transform(&[v(2), v(3), v(4)], v(0), v(1), &[[v(2), v(3), v(4)]]);
+
+        assert_tets_non_ghost(&mesh, vec![
+            [2, 4, 0, 1],
+            [4, 3, 2, 0],
+            [2, 3, 4, 1],
+        ]);
+        mesh.assert_integrity(true);
+    }
+
+    #[test]
+    fn test_cap_transform_more_tets() {
+        // Cap transform is more complex
+        let mut mesh = TetMesh::<(), ()>::delaunay_from_vertices(
+            vec![
+                (Pt3::new(0.0, 0.0, 0.1), ()),
+                (Pt3::new(0.0, 0.0, -0.1), ()),
+                (Pt3::new(1.0, -1.0, 0.0), ()),
+                (Pt3::new(1.2, -0.4, 0.0), ()),
+                (Pt3::new(1.2, 0.4, 0.0), ()),
+                (Pt3::new(1.0, 1.0, 0.0), ()),
+            ],
+            0.0,
+            || (),
+        );
+        mesh.set_track_tri_map(true);
+        mesh.cap_transform(&[v(2), v(3), v(4), v(5)], v(0), v(1), &[[v(2), v(3), v(4)], [v(2), v(4), v(5)]]);
+
+        assert_tets_non_ghost(&mesh, vec![
+            [2, 5, 0, 1],
+            [4, 3, 2, 0],
+            [2, 3, 4, 1],
+            [5, 4, 2, 0],
+            [2, 4, 5, 1],
+        ]);
         mesh.assert_integrity(true);
     }
 }
